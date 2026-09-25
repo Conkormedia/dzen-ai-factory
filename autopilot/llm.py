@@ -179,9 +179,14 @@ class LLM:
         try:
             return extract_json(result.text)
         except LLMError:
+            # A parse failure is very often just truncation (hit max_tokens on a
+            # long structured array) — a repair pass needs AT LEAST as much room
+            # to reproduce the whole thing, usually more once repair-model
+            # overhead is added, so never repair inside a smaller budget.
+            repair_tokens = max(int(max_tokens * 1.3), max_tokens + 4000)
             repair = self.chat(
                 "Ты конвертер. Преобразуй текст в валидный JSON той же структуры, ничего не добавляя. Только JSON.",
-                result.text[:60000], model=self.model_fast, max_tokens=max_tokens, purpose=purpose + ":repair")
+                result.text[:60000], model=self.model_fast, max_tokens=repair_tokens, purpose=purpose + ":repair")
             return extract_json(repair.text)
 
     # --------------------------------------------------------------- backends

@@ -76,7 +76,7 @@ def generate_topics(llm: LLM, project: dict, knowledge: dict, mined_titles: list
     raw = llm.json(
         "Ты SEO-контент-стратег, который умеет находить темы с реальным поисковым и конверсионным потенциалом. "
         "Никогда не рекламируешь никого, кроме указанного сервиса.",
-        prompt, purpose="topic_generation", max_tokens=6000,
+        prompt, purpose="topic_generation", max_tokens=16000,
     )
     items = raw if isinstance(raw, list) else raw.get("topics", []) if isinstance(raw, dict) else []
 
@@ -105,7 +105,7 @@ def generate_topics(llm: LLM, project: dict, knowledge: dict, mined_titles: list
 
 
 def ensure_topic_bank(llm: LLM, db, project: dict, knowledge: dict, mined_titles: list[str], *,
-                      minimum: int = 6, batch: int = 20) -> int:
+                      minimum: int = 6, batch: int = 12) -> int:
     """Top up a project's topic bank if it is running low. Returns topics added."""
     if db.count_topics(project["id"], status="new") >= minimum:
         return 0

@@ -147,7 +147,7 @@ def _prefetch_one(llm: LLM, db: Database, settings: Settings, project: dict) -> 
                 return False
 
     mined_titles = db.mined_titles(project["id"])
-    added = topics_mod.ensure_topic_bank(llm, db, project, knowledge, mined_titles, minimum=6, batch=20)
+    added = topics_mod.ensure_topic_bank(llm, db, project, knowledge, mined_titles, minimum=6, batch=12)
     if added:
         log.info("project=%s topics_added=%s", project["slug"], added)
 

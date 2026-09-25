@@ -237,7 +237,8 @@ def run_forever(settings: Settings, db: Database, tg: Telegram, llm: LLM, publis
                     if db.count_articles(project["id"], "ready") < settings.queue_depth and published_today < project["daily_quota"]:
                         _prefetch_one(llm, db, settings, project)
 
-                    if not in_cooldown and published_today < target and published_today < project["daily_quota"]:
+                    if (settings.publish_mode != "off" and not in_cooldown
+                            and published_today < target and published_today < project["daily_quota"]):
                         if db.ready_articles(project["id"]):
                             _publish_one(db, settings, tg, client, publisher_id, project)
                 except (SessionExpired, NoChannel):

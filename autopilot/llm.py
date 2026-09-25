@@ -232,6 +232,11 @@ class LLM:
             if temperature is not None:
                 kwargs["temperature"] = temperature
         completion = client.chat.completions.create(**kwargs)
+        if not completion.choices:
+            # Some OpenRouter free-tier upstreams return HTTP 200 with choices=null
+            # when the provider errored internally instead of a proper error status.
+            err = getattr(completion, "error", None) or getattr(completion, "model_extra", None)
+            raise RuntimeError(f"empty choices from provider (no completion returned): {err}")
         choice = completion.choices[0]
         text = choice.message.content or ""
         usage = getattr(completion, "usage", None)
@@ -253,7 +258,7 @@ class LLM:
         return any(m in text for m in (
             "model_not_found", "not a valid model", "no endpoints found", "does not exist", "unknown model",
             "invalid model", "not_found_error", "rate limit", "rate-limited", "too many requests",
-            "temporarily", "overloaded", "capacity",
+            "temporarily", "overloaded", "capacity", "empty choices", "no completion returned",
         ))
 
     def _account(self, model: str, purpose: str, result: LLMResult) -> None:

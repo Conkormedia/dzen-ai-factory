@@ -84,6 +84,12 @@ class DzenClient:
         self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
         self._page.set_default_timeout(45000)
         self._page.on("request", self._capture)
+        if not self._page.url.startswith(BASE):
+            # A fresh persistent-context page starts on about:blank. api()'s
+            # in-page fetch() calls need to run FROM dzen.ru or the browser
+            # blocks them as cross-origin (TypeError: Failed to fetch) even
+            # though the profile's session cookies are already there.
+            self.goto(f"{BASE}/profile/editor", wait_ms=2000)
         return self
 
     def close(self) -> None:

@@ -76,8 +76,45 @@ class LLMResult:
     stop_reason: str = ""
 
 
+def _balanced_spans(text: str, open_ch: str, close_ch: str) -> list[str]:
+    """Every top-level substring balanced between open_ch/close_ch, ignoring
+    braces inside string literals. Order of appearance in text."""
+    spans: list[str] = []
+    depth = 0
+    start: int | None = None
+    in_string = False
+    escape = False
+    for i, ch in enumerate(text):
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == open_ch:
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == close_ch and depth > 0:
+            depth -= 1
+            if depth == 0 and start is not None:
+                spans.append(text[start:i + 1])
+                start = None
+    return spans
+
+
 def extract_json(text: str) -> Any:
-    """Parse the first JSON object/array from an LLM answer (tolerates fences/prose)."""
+    """Parse a JSON object/array out of an LLM answer, tolerating fences,
+    preamble/trailing prose, and stray bracketed examples mixed into either.
+    Tries every properly balanced {...} span (largest first, since the real
+    payload is usually the biggest blob), then every [...] span — NOT just
+    the first '{' paired with the last '}', which grabs the wrong thing as
+    soon as the model adds any text around the JSON."""
     text = text.strip()
     fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.S | re.I)
     if fence:
@@ -87,10 +124,8 @@ def extract_json(text: str) -> Any:
     except json.JSONDecodeError:
         pass
     for opener, closer in (("{", "}"), ("[", "]")):
-        start = text.find(opener)
-        end = text.rfind(closer)
-        if start != -1 and end > start:
-            chunk = text[start:end + 1]
+        candidates = sorted(_balanced_spans(text, opener, closer), key=len, reverse=True)
+        for chunk in candidates:
             try:
                 return json.loads(chunk)
             except json.JSONDecodeError:

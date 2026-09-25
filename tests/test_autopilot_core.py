@@ -103,6 +103,24 @@ def test_extract_json_tolerates_fences_and_trailing_prose():
     assert extract_json("Вот ответ: [1,2,3] и всё") == [1, 2, 3]
 
 
+def test_extract_json_finds_real_object_past_a_stray_bracket_list():
+    # Regression: a live free-model response opened with a keyword list in
+    # its preamble before the actual answer object; naive first-'{'-to-
+    # last-'}' matching grabbed nothing valid and fell back to that list.
+    text = (
+        'Ключевые слова: ["BeatScope", "офлайн анализ", "SPL метр"]\n\n'
+        'Вот статья:\n{"title": "Заголовок статьи", "tags": ["a", "b"], "markdown": "## Текст"}'
+    )
+    result = extract_json(text)
+    assert isinstance(result, dict) and result["title"] == "Заголовок статьи"
+
+
+def test_extract_json_prefers_largest_balanced_object():
+    text = 'Пример: {"x": 1}\n\nОтвет: {"title": "T", "markdown": "## body text here", "tags": []}'
+    result = extract_json(text)
+    assert result["title"] == "T"
+
+
 def test_too_similar_catches_near_duplicate_titles():
     history = ["Как настроить автоответчик в WhatsApp для бизнеса"]
     # Same content words, just reordered/reworded connectors -> caught.

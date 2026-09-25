@@ -60,12 +60,23 @@ def run(publication_id: str) -> None:
         except Exception as exc:  # noqa: BLE001
             print("[diag] buttons probe failed:", exc)
 
+        # Dismiss the first-run help popup overlay if present (blocks all clicks).
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(500)
+            overlay = page.query_selector("[class*='help-popup__overlay']")
+            if overlay:
+                overlay.click(force=True, position={"x": 5, "y": 5})
+                page.wait_for_timeout(500)
+        except Exception as exc:  # noqa: BLE001
+            print("[diag] overlay dismiss failed:", exc)
+
         # Try to nudge an autosave: click into the body contenteditable and type a space+backspace.
         try:
             editables = page.query_selector_all("[contenteditable='true']")
             print(f"[diag] found {len(editables)} contenteditable nodes")
             if len(editables) >= 2:
-                editables[1].click()
+                editables[1].click(force=True, timeout=10000)
                 page.keyboard.type(" ")
                 page.wait_for_timeout(500)
                 page.keyboard.press("Backspace")

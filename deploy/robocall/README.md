@@ -41,12 +41,23 @@ Then add the login-portal site to the existing Caddy (see
    ```
    The bot nags you in Telegram if this is still missing once it's alive.
 
-3. **Log into Dzen.** Once the bot token is set, it sends you a one-time
-   `https://dzen-login.31-76-40-61.sslip.io/vnc.html?...` link in Telegram —
-   open it, log into your dzen.ru account exactly as you normally would. The
-   service detects the session, tears the login window down automatically,
-   and starts writing + publishing. The link only works while a login is
-   pending; nothing is exposed afterwards.
+3. **Log into Dzen.** Once the bot token is set, the bot sends Telegram
+   instructions for a one-time remote login. By default nothing is exposed
+   to the internet — it's an SSH port-forward:
+   ```bash
+   ssh -L 6080:localhost:6080 robocall-server   # run on your own machine, keep it open
+   ```
+   then open `http://localhost:6080/vnc.html?autoconnect=true&password=<from the Telegram message>`
+   and log into dzen.ru as usual. The service detects the session, tears the
+   login window down automatically, and starts writing + publishing.
+
+   *Optional:* if you'd rather use a public link instead of SSH (e.g. logging
+   in from a phone), append `caddy-snippet.txt` to `/opt/prio-mcp/Caddyfile`,
+   reload Caddy (`docker exec prio-mcp-caddy-1 caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`),
+   and set `LOGIN_PUBLIC_URL=https://dzen-login.31-76-40-61.sslip.io` in
+   `/etc/dzen-autopilot.env` before restarting — this step was intentionally
+   left for a human to opt into, since it exposes a (password-protected,
+   torn-down-after-login) port to the internet.
 
 Nothing else is required — no per-project setup. The three brands (BeatScope,
 BizGateWay, PRIO Concierge) are seeded from `autopilot/projects.seed.json` at

@@ -88,13 +88,8 @@ def _run_login_portal(settings: Settings, db, tg: Telegram) -> str:
         time.sleep(1.0)
 
         link = _login_link(settings, password)
-        db.log_event(f"Login portal opened: {link}", kind="login")
-        tg.safe_send(
-            "🔐 Нужен вход в Дзен, чтобы публикация заработала.\n\n"
-            f"Открой ссылку и войди в свой аккаунт dzen.ru как обычно:\n{link}\n\n"
-            "Ничего нажимать после входа не нужно — как только увижу активную сессию, "
-            "сам закрою окно и запущу генерацию и публикацию."
-        )
+        db.log_event(f"Login portal opened, bind={settings.login_bind_addr}", kind="login")
+        tg.safe_send(_login_message(settings, password, link))
 
         os.environ["DISPLAY"] = settings.login_display
         with DzenClient(headed_settings) as client:
@@ -106,7 +101,7 @@ def _run_login_portal(settings: Settings, db, tg: Telegram) -> str:
                 if info.get("captcha"):
                     if time.time() - last_nudge > NUDGE_EVERY_SECONDS:
                         last_nudge = time.time()
-                        tg.safe_send(f"⚠️ Дзен показал капчу в окне входа. Пройди её глазами — ссылка та же: {link}")
+                        tg.safe_send("⚠️ Дзен показал капчу в окне входа. Пройди её глазами — окно то же, открывай заново.")
                     continue
                 if info.get("logged_in") and info.get("need_channel") and not info.get("publisher_id"):
                     if time.time() - last_nudge > NUDGE_EVERY_SECONDS:
@@ -118,7 +113,7 @@ def _run_login_portal(settings: Settings, db, tg: Telegram) -> str:
                     break
                 if time.time() - last_nudge > NUDGE_EVERY_SECONDS:
                     last_nudge = time.time()
-                    tg.safe_send(f"⏳ Ещё жду входа в Дзен. Ссылка та же: {link}")
+                    tg.safe_send(_login_message(settings, password, link, reminder=True))
 
         db.set_setting("dzen_publisher_id", publisher_id)
         db.set_setting("dzen_login_complete", "1")
@@ -132,5 +127,31 @@ def _run_login_portal(settings: Settings, db, tg: Telegram) -> str:
 
 
 def _login_link(settings: Settings, password: str) -> str:
-    base = settings.login_public_url.rstrip("/") if settings.login_public_url else f"http://localhost:{settings.login_novnc_port}"
+    """Only meaningful when LOGIN_PUBLIC_URL is set (e.g. a reverse-proxied
+    hostname the operator chose to expose). Otherwise unused — see _login_message."""
+    base = settings.login_public_url.rstrip("/")
     return f"{base}/vnc.html?autoconnect=true&resize=scale&reconnect=true&password={password}"
+
+
+def _login_message(settings: Settings, password: str, link: str, *, reminder: bool = False) -> str:
+    header = "⏳ Ещё жду входа в Дзен." if reminder else "🔐 Нужен вход в Дзен, чтобы публикация заработала."
+    if settings.login_public_url:
+        return (
+            f"{header}\n\n"
+            f"Открой ссылку и войди в свой аккаунт dzen.ru как обычно:\n{link}\n\n"
+            "Ничего нажимать после входа не нужно — как только увижу активную сессию, "
+            "сам закрою окно и запущу генерацию и публикацию."
+        )
+    # No public URL configured (default, no internet exposure): tunnel over SSH.
+    return (
+        f"{header}\n\n"
+        "Вход не выставлен в интернет — заходим через SSH-туннель с твоего компьютера:\n\n"
+        f"1. В терминале на своей машине:\n"
+        f"   ssh -L {settings.login_novnc_port}:localhost:{settings.login_novnc_port} robocall-server\n"
+        f"   (оставь эту сессию открытой)\n"
+        f"2. Открой в браузере:\n"
+        f"   http://localhost:{settings.login_novnc_port}/vnc.html?autoconnect=true&resize=scale&password={password}\n"
+        "3. Войди в dzen.ru как обычно в открывшемся окне.\n\n"
+        "Ничего нажимать после входа не нужно — как только увижу активную сессию, "
+        "сам закрою окно и запущу генерацию и публикацию."
+    )

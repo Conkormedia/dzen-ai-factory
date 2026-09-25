@@ -110,8 +110,12 @@ def _repair(llm: LLM, project: dict, data: dict, problems: list[str], min_chars:
 
 
 def _coerce(data: object) -> dict:
+    # Free models sometimes wrap the single requested object in an array
+    # despite the schema — unwrap rather than fail a whole article over it.
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        data = data[0]
     if not isinstance(data, dict):
-        raise LLMError("Ответ модели не является объектом со статьёй")
+        raise LLMError(f"Ответ модели не является объектом со статьёй: {type(data).__name__} {str(data)[:200]!r}")
     title = str(data.get("title") or "").strip()
     description = str(data.get("description") or "").strip()
     tags = [str(t).strip() for t in (data.get("tags") or []) if str(t).strip()]

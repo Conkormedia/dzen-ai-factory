@@ -19,7 +19,7 @@ from .db import Database
 from .dzen_client import CaptchaRequired, DzenClient, DzenError, NoChannel, SessionExpired, publish_full_article
 from .llm import LLM, LLMError
 from .research import run_research
-from .telegram import Telegram, capture_chat_id
+from .telegram import InvalidToken, Telegram, capture_chat_id
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
                     stream=sys.stdout)
@@ -49,6 +49,7 @@ def seed_projects(db: Database, settings: Settings) -> None:
 
 def wait_for_telegram(settings: Settings, db: Database, env_path: Path) -> Telegram:
     nagged_no_token = False
+    nagged_bad_token = False
     while True:
         bot_token = settings.telegram_bot_token or db.get_setting("telegram_bot_token", "")
         if not bot_token:
@@ -61,7 +62,18 @@ def wait_for_telegram(settings: Settings, db: Database, env_path: Path) -> Teleg
         chat_id = db.get_setting("telegram_chat_id", "") or settings.telegram_chat_id
         if chat_id:
             return Telegram(bot_token, chat_id)
-        captured = capture_chat_id(bot_token, env_path=env_path, db=db, timeout_seconds=20)
+        try:
+            captured = capture_chat_id(bot_token, env_path=env_path, db=db, timeout_seconds=20)
+        except InvalidToken:
+            if not nagged_bad_token:
+                log.error(
+                    "TELEGRAM_BOT_TOKEN is rejected by Telegram (401) — this is not a real token from "
+                    "@BotFather. Fix it with deploy/robocall/configure.sh TELEGRAM_BOT_TOKEN <real token>."
+                )
+                nagged_bad_token = True
+            time.sleep(60)  # back off hard instead of hammering Telegram with a bad token
+            settings.telegram_bot_token = Settings().telegram_bot_token
+            continue
         if captured:
             return Telegram(bot_token, captured)
         log.info("Waiting for the owner to send /start to the bot…")

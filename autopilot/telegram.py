@@ -62,15 +62,33 @@ class Telegram:
         data = r.json()
         return (data.get("result") or {}).get("message_id") if data.get("ok") else None
 
+    def get_me(self) -> dict | None:
+        """Cheap token-validity check (no long-poll wait)."""
+        try:
+            r = requests.post(API.format(token=self.bot_token, method="getMe"), timeout=15)
+        except requests.RequestException:
+            return None
+        if r.status_code == 401:
+            raise InvalidToken("Telegram отклонил TELEGRAM_BOT_TOKEN (401) — это не настоящий токен от @BotFather")
+        r.raise_for_status()
+        data = r.json()
+        return data.get("result") if data.get("ok") else None
+
     def get_updates(self, offset: int | None = None, timeout: int = 25) -> list[dict]:
         params: dict = {"timeout": timeout}
         if offset is not None:
             params["offset"] = offset
         r = requests.post(API.format(token=self.bot_token, method="getUpdates"), json=params,
                           timeout=timeout + 10)
+        if r.status_code == 401:
+            raise InvalidToken("Telegram отклонил TELEGRAM_BOT_TOKEN (401) — это не настоящий токен от @BotFather")
         r.raise_for_status()
         data = r.json()
         return data.get("result", []) if data.get("ok") else []
+
+
+class InvalidToken(RuntimeError):
+    pass
 
 
 def _split(text: str, limit: int = 3900) -> list[str]:
@@ -97,6 +115,8 @@ def capture_chat_id(bot_token: str, *, env_path: Path, db, timeout_seconds: int 
     try:
         updates = tg.get_updates(offset=last_update_id + 1 if last_update_id else None,
                                  timeout=timeout_seconds)
+    except InvalidToken:
+        raise
     except Exception:  # noqa: BLE001
         log.exception("getUpdates failed while waiting for chat id")
         return None

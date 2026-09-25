@@ -298,22 +298,29 @@ class DzenClient:
                 content_state: dict[str, Any], cover_image_id: str = "", tags: list[str] | None = None,
                 mode: str = "publish") -> str:
         endpoint = "update-publication-content-and-publish" if mode == "publish" else "update-publication-content"
-        preview: dict[str, Any] = {"title": title[:140], "snippet": snippet[:300]}
+        # Field names/values below were diffed against a real save request from
+        # the actual Dzen editor UI (captured via request interception on our
+        # own logged-in session) and corrected to match exactly.
+        preview: dict[str, Any] = {"title": title[:140], "snippet": snippet[:300], "galleryPreviewImages": []}
         if cover_image_id:
             preview["image"] = {"id": cover_image_id}
         body = {
             "id": publication_id,
             "preview": preview,
-            "snippetFrozen": True,
+            "snippetFrozen": False,
             "hasNativeAds": False,
             "commentsFlagState": "on",
             "delayedPublicationFlagState": "off",
-            "visibleComments": "visible",
+            "visibleComments": "subscribe-visible",
             "visibilityType": "all",
             "premiumTariffs": [],
-            "customCommentsTitle": "",
             "articleContent": {"contentState": json.dumps(content_state, ensure_ascii=False)},
             "tagsInput": {"tags": [str(t)[:40] for t in (tags or [])][:8], "detectedTagsShown": False},
+            # NOTE: the real client also sends a non-empty "fp" (an anti-bot
+            # fingerprint its own JS computes) here; the server 400s without
+            # one. That token isn't something to extract-and-replay - see
+            # NOTES_ON_PUBLISHING.md. This call will 400 until publish() is
+            # driven from the real editor UI instead of a raw API call.
             "fp": "",
         }
         referer = f"{EDITOR}/id/{publisher_id}/{publication_id}/edit"

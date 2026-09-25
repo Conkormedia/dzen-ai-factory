@@ -42,14 +42,22 @@ PRICES: dict[str, tuple[float, float]] = {
 DEFAULT_MODELS = {
     # provider: (main, fast)
     "anthropic": ("claude-opus-5", "claude-haiku-4-5"),
-    "openrouter": ("anthropic/claude-opus-5", "anthropic/claude-haiku-4.5"),
+    # 30 articles/day of research+writing+repair calls adds up fast on a paid
+    # per-token model; default OpenRouter to its free tier (checked live
+    # against openrouter.ai/api/v1/models, not memorized). Override with
+    # LLM_MODEL / LLM_MODEL_FAST in the env file to go paid for quality.
+    "openrouter": ("nvidia/nemotron-3-super-120b-a12b:free", "google/gemma-4-31b-it:free"),
     "openai": ("gpt-5", "gpt-5-mini"),
     "deepseek": ("deepseek-chat", "deepseek-chat"),
 }
 
-# Fallback chains when a provider rejects a model id (404 / unknown model).
+# Fallback chains: tried in order when a provider rejects a model id (404) or
+# throttles it (429/5xx — common on free-tier shared capacity). For
+# OpenRouter this stays free-tier throughout, ending in openrouter/free
+# (OpenRouter's own auto-routed free fallback) as the last resort.
 FALLBACK_CHAINS = {
-    "openrouter": ["anthropic/claude-sonnet-4.5", "openai/gpt-5", "google/gemini-2.5-pro", "deepseek/deepseek-chat-v3.1"],
+    "openrouter": ["google/gemma-4-31b-it:free", "nvidia/nemotron-3.5-lightning:free", "qwen/qwen3.8-27b:free",
+                  "z-ai/glm-5.2:free", "openrouter/free"],
     "openai": ["gpt-5", "gpt-4.1", "gpt-4o"],
     "deepseek": ["deepseek-chat"],
     "anthropic": ["claude-opus-5", "claude-sonnet-5", "claude-opus-4-8", "claude-sonnet-4-6"],
@@ -230,12 +238,18 @@ class LLM:
     # ---------------------------------------------------------------- helpers
     @staticmethod
     def _is_model_missing(exc: Exception) -> bool:
+        """True for anything worth trying the NEXT model in the chain for:
+        the model doesn't exist, or (common on free tiers) it's throttled or
+        temporarily overloaded — a different free model is usually fine."""
         text = str(exc).lower()
         status = getattr(exc, "status_code", None)
-        if status == 404:
+        if status in (404, 429, 502, 503):
             return True
-        return any(m in text for m in ("model_not_found", "not a valid model", "no endpoints found",
-                                        "does not exist", "unknown model", "invalid model", "not_found_error"))
+        return any(m in text for m in (
+            "model_not_found", "not a valid model", "no endpoints found", "does not exist", "unknown model",
+            "invalid model", "not_found_error", "rate limit", "rate-limited", "too many requests",
+            "temporarily", "overloaded", "capacity",
+        ))
 
     def _account(self, model: str, purpose: str, result: LLMResult) -> None:
         price_in, price_out = PRICES.get(result.model, PRICES.get(model, (0.0, 0.0)))

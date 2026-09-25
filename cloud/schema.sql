@@ -29,19 +29,11 @@ CREATE TABLE IF NOT EXISTS ai_usage (
   updated_at TEXT NOT NULL
 );
 
-CREATE TRIGGER IF NOT EXISTS ai_usage_cap_insert
-BEFORE INSERT ON ai_usage
-WHEN NEW.requests > 50
-BEGIN
-  SELECT RAISE(ABORT, 'ai_usage daily cap exceeded');
-END;
-
-CREATE TRIGGER IF NOT EXISTS ai_usage_cap_update
-BEFORE UPDATE OF requests ON ai_usage
-WHEN NEW.requests > 50
-BEGIN
-  SELECT RAISE(ABORT, 'ai_usage daily cap exceeded');
-END;
+-- The former hard-coded 50 requests/day triggers are removed: the daily
+-- OpenRouter cap is enforced atomically by quota.reserve() using
+-- OPENROUTER_DAILY_LIMIT, which scales with ARTICLES_PER_DAY.
+DROP TRIGGER IF EXISTS ai_usage_cap_insert;
+DROP TRIGGER IF EXISTS ai_usage_cap_update;
 
 CREATE TABLE IF NOT EXISTS resource_usage (
   day TEXT NOT NULL,
@@ -136,3 +128,68 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+-- ---------------------------------------------------------------------------
+-- Autopilot: publication queue, dispatch accounting, daily reports, metrics.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS publications (
+  article_id INTEGER PRIMARY KEY,
+  batch_id INTEGER,
+  source_run_id TEXT NOT NULL DEFAULT '',
+  artifact_name TEXT NOT NULL DEFAULT '',
+  image_count INTEGER NOT NULL DEFAULT 0,
+  cover_file TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'ready',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  claimed_at TEXT,
+  dzen_publication_id TEXT,
+  dzen_url TEXT,
+  publish_mode TEXT NOT NULL DEFAULT '',
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  published_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_publications_status ON publications(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_publications_published ON publications(published_at);
+
+CREATE TABLE IF NOT EXISTS auto_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  day TEXT NOT NULL,
+  dispatch_token TEXT NOT NULL UNIQUE,
+  dispatched_at TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'dispatched',
+  article_id INTEGER,
+  run_id TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_auto_runs_day ON auto_runs(day, status);
+
+CREATE TABLE IF NOT EXISTS daily_reports (
+  day TEXT PRIMARY KEY,
+  sent_at TEXT NOT NULL,
+  telegram_message_id INTEGER,
+  payload_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS channel_stats (
+  day TEXT PRIMARY KEY,
+  subscribers INTEGER,
+  views INTEGER NOT NULL DEFAULT 0,
+  likes INTEGER NOT NULL DEFAULT 0,
+  comments INTEGER NOT NULL DEFAULT 0,
+  shares INTEGER NOT NULL DEFAULT 0,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS publish_assets (
+  id TEXT PRIMARY KEY,
+  article_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  content_type TEXT NOT NULL DEFAULT 'image/jpeg',
+  data BLOB NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_publish_assets_article ON publish_assets(article_id);

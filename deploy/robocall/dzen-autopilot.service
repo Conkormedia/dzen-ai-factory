@@ -1,0 +1,23 @@
+[Unit]
+Description=Dzen AI Factory - Autopilot (multi-project SEO writer + auto-publish)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/dzen-autopilot/app
+EnvironmentFile=/etc/dzen-autopilot.env
+Environment=DZEN_AUTOPILOT_ENV=/etc/dzen-autopilot.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/dzen-autopilot/.venv/bin/python -m autopilot.main
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+# Xvfb/Chromium need real /dev/shm, not the tiny systemd default.
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

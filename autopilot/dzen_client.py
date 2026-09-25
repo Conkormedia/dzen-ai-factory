@@ -1,0 +1,396 @@
+"""Dzen editor client: a persistent Chromium profile (Playwright) + the editor's own JSON API.
+
+All API calls are executed *inside* the logged-in page with ``fetch`` so cookies,
+fingerprint headers and TLS fingerprint are the real browser's. The UI is not
+clicked, which keeps the flow stable across editor redesigns.
+
+Endpoints (observed in the editor / Prozen extension):
+  GET  /media-api/csrf-token
+  POST /editor-api/v2/add-publication?publisherId=..&clientRid=..&clid=320
+  POST /editor-api/v2/add-image?publicationId=..&publisherId=..   (multipart)
+  POST /editor-api/v2/update-publication-content[-and-publish]?publisherId=..&clientRid=..
+  GET  /editor-api/v2/publisher/{id}/stats2?...
+"""
+from __future__ import annotations
+
+import base64
+import json
+import logging
+import re
+import secrets
+import time
+from pathlib import Path
+from typing import Any
+
+from .config import Settings
+from .draftjs import build_content_state, snippet as md_snippet
+
+log = logging.getLogger(__name__)
+
+BASE = "https://dzen.ru"
+EDITOR = f"{BASE}/profile/editor"
+PUBLISHER_RE = re.compile(r"/profile/editor/id/([0-9a-f]{24})")
+
+
+class DzenError(RuntimeError):
+    pass
+
+
+class SessionExpired(DzenError):
+    pass
+
+
+class CaptchaRequired(DzenError):
+    pass
+
+
+class NoChannel(DzenError):
+    pass
+
+
+def client_rid() -> str:
+    return secrets.token_hex(7)
+
+
+class DzenClient:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self._pw: Any = None
+        self._ctx: Any = None
+        self._page: Any = None
+        self._csrf: str = ""
+        self.captured_headers: dict[str, str] = {}
+        self.publisher_id: str = settings.dzen_publisher_id
+
+    # ------------------------------------------------------------- lifecycle
+    def open(self) -> "DzenClient":
+        from playwright.sync_api import sync_playwright
+
+        self.settings.profile_dir.mkdir(parents=True, exist_ok=True)
+        self._pw = sync_playwright().start()
+        launch_kwargs: dict[str, Any] = dict(
+            user_data_dir=str(self.settings.profile_dir),
+            headless=self.settings.headless,
+            locale="ru-RU",
+            timezone_id=self.settings.timezone,
+            viewport={"width": 1366, "height": 860},
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage",
+                  "--lang=ru-RU"],
+            ignore_default_args=["--enable-automation"],
+        )
+        if self.settings.http_proxy:
+            launch_kwargs["proxy"] = {"server": self.settings.http_proxy}
+        self._ctx = self._pw.chromium.launch_persistent_context(**launch_kwargs)
+        self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
+        self._page.set_default_timeout(45000)
+        self._page.on("request", self._capture)
+        return self
+
+    def close(self) -> None:
+        for closer in (lambda: self._ctx and self._ctx.close(), lambda: self._pw and self._pw.stop()):
+            try:
+                closer()
+            except Exception:  # noqa: BLE001
+                pass
+        self._ctx = self._pw = self._page = None
+
+    def __enter__(self) -> "DzenClient":
+        return self.open()
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
+    def _capture(self, request: Any) -> None:
+        url = request.url
+        if "editor-api" in url or "media-api" in url:
+            for name, value in request.headers.items():
+                lname = name.lower()
+                if lname in ("x-csrf-token", "x-fp-token", "x-yandex-uid"):
+                    self.captured_headers[lname] = value
+                    if lname == "x-csrf-token":
+                        self._csrf = value
+
+    # --------------------------------------------------------------- session
+    def goto(self, url: str, wait_ms: int = 2500) -> str:
+        self._page.goto(url, wait_until="domcontentloaded")
+        self._page.wait_for_timeout(wait_ms)
+        return self._page.url
+
+    def check_session(self) -> dict[str, Any]:
+        """Return {'logged_in', 'publisher_id', 'need_channel', 'captcha', 'url'} without raising."""
+        info: dict[str, Any] = {"logged_in": False, "publisher_id": "", "need_channel": False, "captcha": False,
+                                "url": ""}
+        try:
+            url = self.goto(EDITOR, wait_ms=4000)
+            for _ in range(6):  # SPA redirects can take a moment
+                m = PUBLISHER_RE.search(url)
+                if m or "passport" in url or "showcaptcha" in url:
+                    break
+                self._page.wait_for_timeout(1500)
+                url = self._page.url
+            info["url"] = url
+            body = ""
+            try:
+                body = self._page.inner_text("body")[:5000]
+            except Exception:  # noqa: BLE001
+                pass
+            if "showcaptcha" in url or "Подтвердите, что запросы отправляли вы" in body:
+                info["captcha"] = True
+                return info
+            if "passport.yandex" in url or "passport.ya" in url or "/auth" in url.split("?")[0]:
+                return info
+            m = PUBLISHER_RE.search(url)
+            if m:
+                info["logged_in"] = True
+                info["publisher_id"] = m.group(1)
+                self.publisher_id = self.publisher_id or m.group(1)
+                return info
+            # Logged in but no channel yet (creation wizard), or an unknown page.
+            if "dzen.ru" in url and ("Войти" not in body[:800]):
+                info["logged_in"] = True
+                info["need_channel"] = "editor" in url or "create" in url or "канал" in body.lower()
+            return info
+        except Exception as exc:  # noqa: BLE001
+            info["error"] = str(exc)[:300]
+            return info
+
+    def require_session(self) -> str:
+        info = self.check_session()
+        if info.get("captcha"):
+            raise CaptchaRequired("Дзен показал капчу — нужен вход через браузер (/login)")
+        if not info.get("logged_in"):
+            raise SessionExpired("Сессия Дзена не активна — нужен вход через браузер (/login)")
+        pid = self.publisher_id or info.get("publisher_id", "")
+        if not pid:
+            raise NoChannel("Аккаунт залогинен, но канал не найден — создайте канал в Дзене")
+        return pid
+
+    # ------------------------------------------------------------------- api
+    def _js_fetch(self, method: str, url: str, *, body: str | None = None, headers: dict[str, str] | None = None,
+                  form_b64: dict[str, Any] | None = None) -> dict[str, Any]:
+        script = """
+        async ({method, url, body, headers, form}) => {
+          const init = {method, credentials: 'include', headers: Object.assign({}, headers || {})};
+          if (form) {
+            const bin = atob(form.b64); const arr = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+            const fd = new FormData();
+            fd.append(form.field, new Blob([arr], {type: form.type}), form.name);
+            for (const [k, v] of Object.entries(form.extra || {})) fd.append(k, v);
+            init.body = fd;
+          } else if (body !== null && body !== undefined) {
+            init.body = body; init.headers['Content-Type'] = 'application/json';
+          }
+          const r = await fetch(url, init);
+          const text = await r.text();
+          return {status: r.status, text, ctype: r.headers.get('content-type') || ''};
+        }
+        """
+        return self._page.evaluate(script, {"method": method, "url": url, "body": body, "headers": headers or {},
+                                            "form": form_b64})
+
+    def _headers(self, referer: str | None = None) -> dict[str, str]:
+        h = {"Accept": "application/json", "X-Csrf-Token": self._csrf or self.csrf(),
+             "Referer": referer or f"{EDITOR}/id/{self.publisher_id}"}
+        fp = self.captured_headers.get("x-fp-token")
+        if fp:
+            h["X-FP-Token"] = fp
+        return h
+
+    def api(self, method: str, path: str, *, body: dict[str, Any] | None = None, referer: str | None = None,
+            form_b64: dict[str, Any] | None = None, retry_csrf: bool = True) -> Any:
+        url = path if path.startswith("http") else BASE + path
+        resp = self._js_fetch(method, url, body=json.dumps(body, ensure_ascii=False) if body is not None else None,
+                              headers=self._headers(referer), form_b64=form_b64)
+        status, text = int(resp["status"]), str(resp["text"])
+        if "captcha" in text.lower()[:3000] or "showcaptcha" in text[:3000]:
+            raise CaptchaRequired(f"captcha on {path}")
+        if status in (401, 403) and retry_csrf:
+            self._csrf = ""
+            self.csrf()
+            return self.api(method, path, body=body, referer=referer, form_b64=form_b64, retry_csrf=False)
+        if status in (401, 403):
+            raise SessionExpired(f"{status} on {path}: {text[:200]}")
+        if status >= 400:
+            raise DzenError(f"{status} on {path}: {text[:400]}")
+        if not text.strip():
+            return {}
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            if "<html" in text[:500].lower():
+                raise SessionExpired(f"HTML instead of JSON on {path} (login page?)")
+            raise DzenError(f"non-JSON on {path}: {text[:200]}")
+
+    def csrf(self) -> str:
+        resp = self._js_fetch("GET", f"{BASE}/media-api/csrf-token", headers={"Accept": "application/json"})
+        if int(resp["status"]) >= 400:
+            raise SessionExpired(f"csrf-token {resp['status']}")
+        try:
+            data = json.loads(resp["text"])
+        except json.JSONDecodeError:
+            raise SessionExpired("csrf-token returned non-JSON")
+        token = str(data.get("result") or data.get("token") or data.get("csrfToken") or "")
+        if not token:
+            raise DzenError(f"csrf-token payload: {resp['text'][:200]}")
+        self._csrf = token
+        return token
+
+    # ------------------------------------------------------------ publishing
+    def create_draft(self, publisher_id: str, publication_type: str = "article") -> str:
+        data = self.api("POST", f"/editor-api/v2/add-publication?publisherId={publisher_id}&clientRid={client_rid()}&clid=320",
+                        body={"title": "", "publisherId": publisher_id, "publicationType": publication_type, "fp": ""})
+        pub_id = str(data.get("id") or data.get("publicationId") or data.get("_id") or
+                     (data.get("publication") or {}).get("id") or "")
+        if not pub_id:
+            raise DzenError(f"add-publication without id: {json.dumps(data)[:300]}")
+        return pub_id
+
+    def upload_image(self, publisher_id: str, publication_id: str, path: str | Path) -> str:
+        data = Path(path).read_bytes()
+        b64 = base64.b64encode(data).decode("ascii")
+        referer = f"{EDITOR}/id/{publisher_id}/{publication_id}/edit"
+        last_error = ""
+        for field in ("image", "file", "upload"):
+            try:
+                resp = self.api("POST", f"/editor-api/v2/add-image?publicationId={publication_id}&publisherId={publisher_id}&clientRid={client_rid()}",
+                                referer=referer, form_b64={"b64": b64, "field": field, "name": Path(path).name,
+                                                           "type": "image/jpeg", "extra": {"publicationId": publication_id}})
+                image_id = str(resp.get("id") or resp.get("imageId") or resp.get("_id") or
+                               (resp.get("image") or {}).get("id") or (resp.get("result") or {}).get("id") or "")
+                if image_id:
+                    return image_id
+                last_error = f"no id in {json.dumps(resp)[:200]}"
+            except DzenError as exc:
+                if isinstance(exc, (SessionExpired, CaptchaRequired)):
+                    raise
+                last_error = str(exc)
+                if "400" not in last_error and "415" not in last_error and "422" not in last_error:
+                    break
+        raise DzenError(f"add-image failed: {last_error}")
+
+    def publish(self, publisher_id: str, publication_id: str, *, title: str, snippet: str,
+                content_state: dict[str, Any], cover_image_id: str = "", tags: list[str] | None = None,
+                mode: str = "publish") -> str:
+        endpoint = "update-publication-content-and-publish" if mode == "publish" else "update-publication-content"
+        preview: dict[str, Any] = {"title": title[:140], "snippet": snippet[:300]}
+        if cover_image_id:
+            preview["image"] = {"id": cover_image_id}
+        body = {
+            "id": publication_id,
+            "preview": preview,
+            "snippetFrozen": True,
+            "hasNativeAds": False,
+            "commentsFlagState": "on",
+            "delayedPublicationFlagState": "off",
+            "visibleComments": "visible",
+            "visibilityType": "all",
+            "premiumTariffs": [],
+            "customCommentsTitle": "",
+            "articleContent": {"contentState": json.dumps(content_state, ensure_ascii=False)},
+            "tagsInput": {"tags": [str(t)[:40] for t in (tags or [])][:8], "detectedTagsShown": False},
+            "fp": "",
+        }
+        referer = f"{EDITOR}/id/{publisher_id}/{publication_id}/edit"
+        self.api("POST", f"/editor-api/v2/{endpoint}?publisherId={publisher_id}&clientRid={client_rid()}",
+                 body=body, referer=referer)
+        return f"{BASE}/a/{publication_id}"
+
+    # ----------------------------------------------------------------- stats
+    def publication_stats(self, publisher_id: str, publication_ids: list[str]) -> dict[str, dict[str, int]]:
+        out: dict[str, dict[str, int]] = {}
+        for i in range(0, len(publication_ids), 50):
+            chunk = publication_ids[i:i + 50]
+            qs = "&".join(f"publicationIds={pid}" for pid in chunk)
+            fields = "&".join(f"fields={f}" for f in ("views", "typeSpecificViews", "likes", "comments", "shares",
+                                                       "deepViews", "impressions"))
+            data = self.api("GET", f"/editor-api/v2/publisher/{publisher_id}/stats2?publisherId={publisher_id}&{qs}&{fields}&pageSize=50&page=0")
+            for item in self._iter_items(data):
+                pid = str(item.get("publicationId") or (item.get("publication") or {}).get("id") or item.get("id") or "")
+                stats = item.get("stats") if isinstance(item.get("stats"), dict) else item
+                if pid:
+                    out[pid] = {
+                        "views": int(stats.get("views") or stats.get("typeSpecificViews") or stats.get("deepViews") or 0),
+                        "likes": int(stats.get("likes") or 0),
+                        "comments": int(stats.get("comments") or 0),
+                        "shares": int(stats.get("shares") or 0),
+                    }
+        return out
+
+    def channel_stats(self, publisher_id: str) -> dict[str, Any]:
+        fields = "&".join(f"fields={f}" for f in ("views", "likes", "comments", "shares", "subscribers",
+                                                   "subscribersDiff", "impressions"))
+        data = self.api("GET", f"/editor-api/v2/publisher/{publisher_id}/stats2?publisherId={publisher_id}&allPublications=true&{fields}&groupBy=flight&sortBy=addTime&sortOrderDesc=true&total=true&pageSize=1&page=0")
+        total = (data.get("total") or {}).get("stats") if isinstance(data.get("total"), dict) else {}
+        return {"raw": data, "total": total or {}, "subscribers": self._dig(data, "subscribers")}
+
+    @staticmethod
+    def _iter_items(data: Any) -> list[dict[str, Any]]:
+        if isinstance(data, list):
+            return [x for x in data if isinstance(x, dict)]
+        if not isinstance(data, dict):
+            return []
+        for key in ("publications", "items", "data", "results", "stats"):
+            val = data.get(key)
+            if isinstance(val, list):
+                return [x for x in val if isinstance(x, dict)]
+        return []
+
+    @staticmethod
+    def _dig(data: Any, key: str) -> Any:
+        if isinstance(data, dict):
+            if key in data and not isinstance(data[key], (dict, list)):
+                return data[key]
+            for v in data.values():
+                found = DzenClient._dig(v, key)
+                if found is not None:
+                    return found
+        elif isinstance(data, list):
+            for v in data:
+                found = DzenClient._dig(v, key)
+                if found is not None:
+                    return found
+        return None
+
+    def screenshot(self, path: str | Path) -> None:
+        try:
+            self._page.screenshot(path=str(path), full_page=False)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def publish_full_article(client: "DzenClient", publisher_id: str, *, title: str, markdown: str,
+                         description: str, tags: list[str], cover_path: Path | None,
+                         inline_image_paths: list[Path], mode: str = "publish") -> dict[str, Any]:
+    """Creates a draft, uploads cover + inline images, writes Draft.js content, publishes.
+
+    Returns {"publication_id", "url", "mode"}. Raises SessionExpired/CaptchaRequired/
+    NoChannel/DzenError — callers decide how to react (retry, pause, alert).
+    """
+    publication_id = client.create_draft(publisher_id)
+    log.info("Dzen draft created id=%s title=%r", publication_id, title)
+
+    cover_id = ""
+    if cover_path and Path(cover_path).is_file():
+        try:
+            cover_id = client.upload_image(publisher_id, publication_id, cover_path)
+        except DzenError:
+            log.exception("cover upload failed, publishing without a preview image")
+
+    image_ids: list[str] = []
+    for path in inline_image_paths:
+        if not Path(path).is_file():
+            continue
+        try:
+            image_ids.append(client.upload_image(publisher_id, publication_id, path))
+            time.sleep(0.4)  # be gentle with the editor's upload pipeline
+        except DzenError:
+            log.exception("inline image upload failed for %s", path)
+
+    content_state = build_content_state(markdown, image_ids)
+    url = client.publish(
+        publisher_id, publication_id, title=title, snippet=description or md_snippet(markdown),
+        content_state=content_state, cover_image_id=cover_id, tags=tags, mode=mode,
+    )
+    log.info("Dzen publish ok id=%s mode=%s url=%s", publication_id, mode, url)
+    return {"publication_id": publication_id, "url": url, "mode": mode}

@@ -1,0 +1,24 @@
+# local environments
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+!.env.cloud.example
+
+# runtime data (SQLite, logs, backups, image batches, outbox)
+data/
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# node / wrangler
+node_modules/
+.wrangler/
+
+# publisher session material (never commit)
+deploy/**/cookies*.txt
+deploy/**/storage_state*.json
+*.storage_state.json

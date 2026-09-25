@@ -39,8 +39,13 @@ def test_cloud_quota_uses_new_utc_day_after_midnight(monkeypatch):
     assert calls[-1][1][0] == '2026-09-06'
 
 
-def test_d1_schema_has_openrouter_hard_cap_triggers():
+def test_d1_schema_drops_legacy_hard_cap_triggers():
+    """The daily OpenRouter cap is enforced by quota.reserve() with
+    OPENROUTER_DAILY_LIMIT; the old fixed 50/day triggers must be gone so
+    ARTICLES_PER_DAY can scale."""
     schema = (Path(__file__).resolve().parents[1] / 'cloud' / 'schema.sql').read_text(encoding='utf-8')
-    assert 'CREATE TRIGGER IF NOT EXISTS ai_usage_cap_insert' in schema
-    assert 'CREATE TRIGGER IF NOT EXISTS ai_usage_cap_update' in schema
-    assert 'WHEN NEW.requests > 50' in schema
+    assert 'CREATE TRIGGER' not in schema
+    assert 'DROP TRIGGER IF EXISTS ai_usage_cap_insert' in schema
+    assert 'DROP TRIGGER IF EXISTS ai_usage_cap_update' in schema
+    assert 'CREATE TABLE IF NOT EXISTS publications' in schema
+    assert 'CREATE TABLE IF NOT EXISTS auto_runs' in schema

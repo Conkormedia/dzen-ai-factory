@@ -1,0 +1,3 @@
+dzen-login.31-76-40-61.sslip.io {
+	reverse_proxy host.docker.internal:6080
+}

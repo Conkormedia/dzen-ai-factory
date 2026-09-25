@@ -121,5 +121,8 @@ def _coerce(data: object) -> dict:
     tags = [str(t).strip() for t in (data.get("tags") or []) if str(t).strip()]
     markdown = str(data.get("markdown") or "").strip()
     if not title or not markdown:
-        raise LLMError("В ответе модели нет title или markdown")
+        raise LLMError(
+            f"В ответе модели нет title или markdown; ключи: {sorted(data.keys())}, "
+            f"title={title[:60]!r}, markdown_len={len(markdown)}"
+        )
     return {"title": title, "description": description, "tags": tags, "markdown": markdown}

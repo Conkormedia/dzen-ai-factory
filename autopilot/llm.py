@@ -37,6 +37,9 @@ PRICES: dict[str, tuple[float, float]] = {
     "claude-fable-5-1": (10.0, 50.0),
     "claude-opus-4-8": (5.0, 25.0),
     "claude-sonnet-4-6": (3.0, 15.0),
+    # Cheap paid backstop for the OpenRouter free-tier chain (live pricing
+    # from openrouter.ai/api/v1/models, not memorized).
+    "deepseek/deepseek-chat": (0.32, 0.89),
 }
 
 DEFAULT_MODELS = {
@@ -46,18 +49,24 @@ DEFAULT_MODELS = {
     # per-token model; default OpenRouter to its free tier (checked live
     # against openrouter.ai/api/v1/models, not memorized). Override with
     # LLM_MODEL / LLM_MODEL_FAST in the env file to go paid for quality.
-    "openrouter": ("nvidia/nemotron-3-super-120b-a12b:free", "google/gemma-4-31b-it:free"),
+    # gemma-4-31b-it:free was consistently 429'd on live tests (shared Google
+    # AI Studio pool saturated) while nemotron-3.5-lightning:free reliably
+    # answered, so it's the fast/repair-chain default instead.
+    "openrouter": ("nvidia/nemotron-3-super-120b-a12b:free", "nvidia/nemotron-3.5-lightning:free"),
     "openai": ("gpt-5", "gpt-5-mini"),
     "deepseek": ("deepseek-chat", "deepseek-chat"),
 }
 
 # Fallback chains: tried in order when a provider rejects a model id (404) or
 # throttles it (429/5xx — common on free-tier shared capacity). For
-# OpenRouter this stays free-tier throughout, ending in openrouter/free
-# (OpenRouter's own auto-routed free fallback) as the last resort.
+# OpenRouter this is free-first (nemotron-3.5-lightning ahead of the
+# consistently-429'd gemma), ending in openrouter/free (OpenRouter's own
+# auto-routed free fallback) and then ONE cheap paid model as a true last
+# resort so a fully saturated free tier still produces an article, not a
+# failure — "use free and paid together for optimization" per the user.
 FALLBACK_CHAINS = {
-    "openrouter": ["google/gemma-4-31b-it:free", "nvidia/nemotron-3.5-lightning:free", "qwen/qwen3.8-27b:free",
-                  "z-ai/glm-5.2:free", "openrouter/free"],
+    "openrouter": ["nvidia/nemotron-3.5-lightning:free", "qwen/qwen3.8-27b:free", "z-ai/glm-5.2:free",
+                  "google/gemma-4-31b-it:free", "openrouter/free", "deepseek/deepseek-chat"],
     "openai": ["gpt-5", "gpt-4.1", "gpt-4o"],
     "deepseek": ["deepseek-chat"],
     "anthropic": ["claude-opus-5", "claude-sonnet-5", "claude-opus-4-8", "claude-sonnet-4-6"],

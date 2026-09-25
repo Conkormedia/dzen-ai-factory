@@ -40,16 +40,23 @@ def run(slug: str) -> None:
     tg = Telegram(settings.telegram_bot_token, db.get_setting("telegram_chat_id", ""))
     print(f"[testrun] project={project['name']} provider={llm.provider} model={llm.model} fast={llm.model_fast}")
 
-    print("[testrun] researching + writing (this can take a couple of minutes)...")
-    ok = autopilot_main._prefetch_one(llm, db, settings, project)
-    if not ok:
-        raise SystemExit("[testrun] no article produced - check the log lines above for why")
-    article = db.query(
-        "SELECT id,title,chars,quality_json FROM articles WHERE project_id=? AND status='ready' ORDER BY id DESC LIMIT 1",
-        (project["id"],),
-    )[0]
-    print(f"[testrun] wrote article #{article['id']} {article['title']!r} ({article['chars']} chars)")
-    print(f"[testrun] quality: {article['quality_json']}")
+    existing = db.ready_articles(project["id"])
+    if existing:
+        article = existing[0]
+        print(f"[testrun] reusing already-ready article #{article['id']} {article['title']!r} "
+              f"({article['chars']} chars) instead of writing a new one")
+    else:
+        print("[testrun] researching + writing (this can take a couple of minutes)...")
+        ok = autopilot_main._prefetch_one(llm, db, settings, project)
+        if not ok:
+            raise SystemExit("[testrun] no article produced - check the log lines above for why")
+        article = db.query(
+            "SELECT id,title,chars,quality_json FROM articles WHERE project_id=? AND status='ready' "
+            "ORDER BY id DESC LIMIT 1",
+            (project["id"],),
+        )[0]
+        print(f"[testrun] wrote article #{article['id']} {article['title']!r} ({article['chars']} chars)")
+        print(f"[testrun] quality: {article['quality_json']}")
 
     print("[testrun] publishing to Dzen...")
     with DzenClient(settings) as client:

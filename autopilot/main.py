@@ -304,7 +304,14 @@ def main() -> None:
     tg.safe_send(f"🧠 LLM подключён: {llm.provider}/{llm.model}")
 
     while True:
-        publisher_id = login_portal.ensure_login(settings, db, tg)
+        try:
+            publisher_id = login_portal.ensure_login(settings, db, tg)
+        except Exception:  # noqa: BLE001
+            log.exception("login portal crashed, retrying in 20s")
+            db.log_event("login portal crashed, retrying", kind="crash", level="error")
+            tg.safe_send("⚠️ Окно входа в Дзен упало с ошибкой, открываю заново через 20 секунд.")
+            time.sleep(20)
+            continue
         try:
             run_forever(settings, db, tg, llm, publisher_id)
         except (SessionExpired, NoChannel) as exc:

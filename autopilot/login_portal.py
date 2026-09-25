@@ -67,7 +67,9 @@ def ensure_login(settings: Settings, db, tg: Telegram) -> str:
 
 
 def _run_login_portal(settings: Settings, db, tg: Telegram) -> str:
-    password = secrets.token_urlsafe(9)
+    # Classic VNC auth (DES-keyed challenge) only uses the first 8 bytes of the
+    # password; anything longer risks a client/server truncation mismatch.
+    password = secrets.token_hex(4)
     procs: list[_Proc] = []
     headed_settings = Settings(**{**settings.__dict__, "headless": False})
 
@@ -93,11 +95,16 @@ def _run_login_portal(settings: Settings, db, tg: Telegram) -> str:
 
         os.environ["DISPLAY"] = settings.login_display
         with DzenClient(headed_settings) as client:
+            client.goto("https://dzen.ru/profile/editor", wait_ms=2000)  # one-time; nothing else is on the page yet
+
             publisher_id = ""
             last_nudge = time.time()
             while not publisher_id:
                 time.sleep(POLL_SECONDS)
-                info = client.check_session()
+                # peek, never goto(): the human may be mid-navigation (passport.yandex
+                # redirects etc.) — forcing a navigation here raced their own clicks
+                # and crashed Playwright's frame tracking.
+                info = client.peek_session()
                 if info.get("captcha"):
                     if time.time() - last_nudge > NUDGE_EVERY_SECONDS:
                         last_nudge = time.time()
@@ -130,7 +137,9 @@ def _login_link(settings: Settings, password: str) -> str:
     """Only meaningful when LOGIN_PUBLIC_URL is set (e.g. a reverse-proxied
     hostname the operator chose to expose). Otherwise unused — see _login_message."""
     base = settings.login_public_url.rstrip("/")
-    return f"{base}/vnc.html?autoconnect=true&resize=scale&reconnect=true&password={password}"
+    # No reconnect=true: noVNC would otherwise keep silently re-dialing (and
+    # websockify forking a new worker per attempt) on any transient hiccup.
+    return f"{base}/vnc.html?autoconnect=true&resize=scale&password={password}"
 
 
 def _login_message(settings: Settings, password: str, link: str, *, reminder: bool = False) -> str:

@@ -116,10 +116,31 @@ class DzenClient:
         self._page.wait_for_timeout(wait_ms)
         return self._page.url
 
-    def check_session(self) -> dict[str, Any]:
-        """Return {'logged_in', 'publisher_id', 'need_channel', 'captcha', 'url'} without raising."""
+    def _interpret(self, url: str, body: str) -> dict[str, Any]:
         info: dict[str, Any] = {"logged_in": False, "publisher_id": "", "need_channel": False, "captcha": False,
-                                "url": ""}
+                                "url": url}
+        if "showcaptcha" in url or "Подтвердите, что запросы отправляли вы" in body:
+            info["captcha"] = True
+            return info
+        if "passport.yandex" in url or "passport.ya" in url or "/auth" in url.split("?")[0]:
+            return info
+        m = PUBLISHER_RE.search(url)
+        if m:
+            info["logged_in"] = True
+            info["publisher_id"] = m.group(1)
+            self.publisher_id = self.publisher_id or m.group(1)
+            return info
+        # Logged in but no channel yet (creation wizard), or an unknown page.
+        if "dzen.ru" in url and ("Войти" not in body[:800]):
+            info["logged_in"] = True
+            info["need_channel"] = "editor" in url or "create" in url or "канал" in body.lower()
+        return info
+
+    def check_session(self) -> dict[str, Any]:
+        """Force-navigate to the editor and interpret the result. Only safe to call
+        when nothing else may be driving the SAME page (e.g. headless re-checks) —
+        for polling *during* a human-driven login, use peek_session() instead, which
+        never navigates and so can't race the person's own clicks/redirects."""
         try:
             url = self.goto(EDITOR, wait_ms=4000)
             for _ in range(6):  # SPA redirects can take a moment
@@ -128,31 +149,29 @@ class DzenClient:
                     break
                 self._page.wait_for_timeout(1500)
                 url = self._page.url
-            info["url"] = url
             body = ""
             try:
                 body = self._page.inner_text("body")[:5000]
             except Exception:  # noqa: BLE001
                 pass
-            if "showcaptcha" in url or "Подтвердите, что запросы отправляли вы" in body:
-                info["captcha"] = True
-                return info
-            if "passport.yandex" in url or "passport.ya" in url or "/auth" in url.split("?")[0]:
-                return info
-            m = PUBLISHER_RE.search(url)
-            if m:
-                info["logged_in"] = True
-                info["publisher_id"] = m.group(1)
-                self.publisher_id = self.publisher_id or m.group(1)
-                return info
-            # Logged in but no channel yet (creation wizard), or an unknown page.
-            if "dzen.ru" in url and ("Войти" not in body[:800]):
-                info["logged_in"] = True
-                info["need_channel"] = "editor" in url or "create" in url or "канал" in body.lower()
-            return info
+            return self._interpret(url, body)
         except Exception as exc:  # noqa: BLE001
-            info["error"] = str(exc)[:300]
-            return info
+            return {"logged_in": False, "publisher_id": "", "need_channel": False, "captcha": False,
+                    "url": "", "error": str(exc)[:300]}
+
+    def peek_session(self) -> dict[str, Any]:
+        """Read whatever page is currently loaded WITHOUT navigating — safe to poll
+        every few seconds while a human is actively logging in on the same page."""
+        try:
+            url = self._page.url
+            try:
+                body = self._page.inner_text("body")[:5000]
+            except Exception:  # noqa: BLE001
+                body = ""
+            return self._interpret(url, body)
+        except Exception as exc:  # noqa: BLE001
+            return {"logged_in": False, "publisher_id": "", "need_channel": False, "captcha": False,
+                    "url": "", "error": str(exc)[:300]}
 
     def require_session(self) -> str:
         info = self.check_session()

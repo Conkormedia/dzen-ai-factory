@@ -225,6 +225,11 @@ def _publish_one(db: Database, settings: Settings, tg: Telegram, client: DzenCli
         db.update_article(article["id"], status="ready", last_error=str(exc)[:500])
         db.add_run("publish", "failed", project_id=project["id"], article_id=article["id"], note=str(exc)[:200])
         return False
+    except Exception as exc:  # noqa: BLE001 - e.g. a raw Playwright error, not our DzenError
+        log.exception("unexpected publish failure for article #%s", article["id"])
+        db.update_article(article["id"], status="ready", last_error=f"{type(exc).__name__}: {exc}"[:500])
+        db.add_run("publish", "failed", project_id=project["id"], article_id=article["id"], note=str(exc)[:200])
+        return False
 
 
 def run_forever(settings: Settings, db: Database, tg: Telegram, llm: LLM, publisher_id: str) -> None:

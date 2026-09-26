@@ -169,6 +169,101 @@ def _atomic_image(image_id: str) -> dict[str, Any]:
             "entityRanges": [], "data": {"image": {"id": image_id}}}
 
 
+def _inline_html(raw: str) -> str:
+    """Inline markdown -> inline HTML (bold/italic/links/code), HTML-escaped."""
+    import html as _html
+
+    out = ""
+    pos = 0
+    for m in _INLINE_RE.finditer(raw):
+        out += _html.escape(raw[pos:m.start()])
+        if m.group("b") is not None or m.group("b2") is not None:
+            out += f"<b>{_html.escape(m.group('b') or m.group('b2') or '')}</b>"
+        elif m.group("i") is not None or m.group("i2") is not None:
+            out += f"<i>{_html.escape(m.group('i') or m.group('i2') or '')}</i>"
+        elif m.group("lt") is not None:
+            url = _html.escape(m.group("lu").rstrip(".,;"), quote=True)
+            out += f'<a href="{url}">{_html.escape(m.group("lt"))}</a>'
+        elif m.group("c") is not None:
+            out += f"<code>{_html.escape(m.group('c'))}</code>"
+        pos = m.end()
+    out += _html.escape(raw[pos:])
+    return out
+
+
+def markdown_to_html(markdown: str) -> str:
+    """Markdown -> semantic HTML for CLIPBOARD PASTE into Draft.js. Draft.js's
+    default paste handler parses h1-h6/b/i/ul/ol/li/blockquote/a on paste into
+    real blocks — this is how content reaches the editor when driving the
+    real UI (as opposed to build_content_state, which builds the raw block
+    JSON directly for API calls)."""
+    html_parts: list[str] = []
+    para: list[str] = []
+
+    def flush() -> None:
+        if para:
+            text = _inline_html(" ".join(s.strip() for s in para))
+            if text.strip():
+                html_parts.append(f"<p>{text}</p>")
+            para.clear()
+
+    list_buffer: list[str] = []
+    list_tag: str | None = None
+
+    def flush_list() -> None:
+        nonlocal list_tag
+        if list_buffer and list_tag:
+            items = "".join(f"<li>{item}</li>" for item in list_buffer)
+            html_parts.append(f"<{list_tag}>{items}</{list_tag}>")
+        list_buffer.clear()
+        list_tag = None
+
+    for line in markdown.replace("\r\n", "\n").split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            flush()
+            flush_list()
+            continue
+        m = re.match(r"^(#{1,6})\s+(.*)$", stripped)
+        if m:
+            flush()
+            flush_list()
+            level = len(m.group(1))
+            tag = "h2" if level <= 2 else "h3"
+            html_parts.append(f"<{tag}>{_inline_html(m.group(2).strip())}</{tag}>")
+            continue
+        if re.fullmatch(r"[-*_]{3,}", stripped):
+            flush()
+            flush_list()
+            continue
+        m = re.match(r"^[-+*]\s+(.*)$", stripped)
+        if m:
+            flush()
+            if list_tag != "ul":
+                flush_list()
+                list_tag = "ul"
+            list_buffer.append(_inline_html(m.group(1).strip()))
+            continue
+        m = re.match(r"^\d+[.)]\s+(.*)$", stripped)
+        if m:
+            flush()
+            if list_tag != "ol":
+                flush_list()
+                list_tag = "ol"
+            list_buffer.append(_inline_html(m.group(1).strip()))
+            continue
+        if stripped.startswith(">"):
+            flush()
+            flush_list()
+            html_parts.append(f"<blockquote>{_inline_html(stripped.lstrip('> ').strip())}</blockquote>")
+            continue
+        flush_list()
+        para.append(stripped)
+    flush()
+    flush_list()
+    return "\n".join(html_parts)
+
+
 def snippet(markdown: str, limit: int = 200) -> str:
     text = re.sub(r"^#{1,6}\s+.*$", "", markdown, flags=re.M)
     text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)

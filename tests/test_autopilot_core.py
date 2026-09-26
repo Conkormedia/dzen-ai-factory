@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from autopilot.db import Database
-from autopilot.draftjs import build_content_state, snippet, utf16_len
+from autopilot.draftjs import build_content_state, markdown_to_html, snippet, utf16_len
 from autopilot.llm import extract_json
 from autopilot.quality import allowed_domains, check_article, plain_text, sanitize_markdown
 from autopilot.topics import _too_similar
@@ -85,6 +85,22 @@ def test_draftjs_inline_styles_links_and_images():
     assert text_block["inlineStyleRanges"][0]["style"] == "BOLD"
     entity_key = str(text_block["entityRanges"][0]["key"])
     assert cs["entityMap"][entity_key]["data"]["url"] == "https://bizgateway.pro/x"
+
+
+def test_markdown_to_html_converts_semantic_blocks_for_paste():
+    md = "## Раздел\n\nТекст с **жирным** и [ссылкой](https://x.com/a).\n\n- один\n- два\n\n> цитата\n\n1. раз\n2. два"
+    html = markdown_to_html(md)
+    assert "<h2>Раздел</h2>" in html
+    assert "<b>жирным</b>" in html
+    assert '<a href="https://x.com/a">ссылкой</a>' in html
+    assert "<ul><li>один</li><li>два</li></ul>" in html
+    assert "<blockquote>цитата</blockquote>" in html
+    assert "<ol><li>раз</li><li>два</li></ol>" in html
+
+
+def test_markdown_to_html_escapes_special_characters():
+    html = markdown_to_html("Текст с <тегом> и & амперсандом")
+    assert "&lt;тегом&gt;" in html and "&amp;" in html
 
 
 def test_draftjs_utf16_offsets_count_surrogate_pairs():

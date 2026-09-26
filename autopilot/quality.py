@@ -58,6 +58,8 @@ def find_third_party_brands(markdown: str, project_name: str, extra_allowed: lis
     for m in _LATIN_PHRASE_RE.finditer(text):
         phrase = m.group(0).strip()
         words = phrase.split()
+        if len(words) == 1 and len(words[0]) < 3:
+            continue  # single letters/short shortcut notation (⌘K, ⌥Q) - not a brand
         if all(w.lower() in allowed for w in words):
             continue
         key = phrase.lower()

@@ -75,7 +75,8 @@ class DzenClient:
             timezone_id=self.settings.timezone,
             viewport={"width": 1366, "height": 860},
             args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage",
-                  "--lang=ru-RU"],
+                  "--lang=ru-RU", "--disable-session-crashed-bubble", "--disable-infobars",
+                  "--noerrdialogs"],
             ignore_default_args=["--enable-automation"],
         )
         if self.settings.http_proxy:
@@ -472,6 +473,16 @@ class DzenClient:
             fc_info.value.set_files(str(path))
         except Exception:
             log.exception("image upload panel did not behave as expected for %s", path)
+            # The add-media panel (drag-drop area + link field) stays open on
+            # this failure path - left alone, it sat on top of the page and
+            # blocked every later "Опубликовать" click on this draft.
+            try:
+                self._page.keyboard.press("Escape")
+                close_x = self._page.query_selector("[class*='close']")
+                if close_x and close_x.is_visible():
+                    close_x.click(force=True, timeout=2000)
+            except Exception:  # noqa: BLE001
+                pass
             return False
         self._page.wait_for_timeout(4000)
         try:
@@ -510,6 +521,7 @@ class DzenClient:
         if mode != "publish":
             return edit_url
 
+        self._page.keyboard.press("Escape")  # dismiss any stray leftover overlay before the publish click
         self._page.get_by_role("button", name="Опубликовать").first.click(force=True, timeout=10000)
         self._page.wait_for_timeout(1500)
         # First click opens a "Публикация" settings side panel with its OWN

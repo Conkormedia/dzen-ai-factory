@@ -11,7 +11,7 @@ from autopilot.db import Database
 from autopilot.draftjs import build_content_state, markdown_to_html, snippet, utf16_len
 from autopilot.images import collect_real_image_urls
 from autopilot.llm import extract_json
-from autopilot.quality import allowed_domains, check_article, plain_text, sanitize_markdown
+from autopilot.quality import allowed_domains, check_article, find_third_party_brands, plain_text, sanitize_markdown
 from autopilot.research import _real_images
 from autopilot.topics import _too_similar, generate_topics
 from bs4 import BeautifulSoup
@@ -151,6 +151,34 @@ def test_too_similar_catches_near_duplicate_titles():
 def test_plain_text_drops_markup():
     text = plain_text("## Заголовок\n\n**Жирный** текст с [ссылкой](https://x.com) и `код`.")
     assert "#" not in text and "**" not in text and "[" not in text
+
+
+def test_find_third_party_brands_catches_the_live_incident():
+    # Regression: a live article fabricated a claim about a named third-party
+    # company (a car maker's model launch) while promoting BizGateWay.
+    text = (
+        'Источник «АвтоВАЗ» сообщил о начале серийного производства кроссовера Lada Azimut в Тольятти. '
+        'BizGateWay помогает автосалонам. Подключение WhatsApp и Telegram, интеграция через MCP и API.'
+    )
+    found = find_third_party_brands(text, "BizGateWay")
+    assert "Lada Azimut" in found
+    assert "«АвтоВАЗ»" in found
+    assert not any("bizgateway" in f.lower() for f in found)
+    assert not any(f in ("WhatsApp", "Telegram", "MCP", "API") for f in found)
+
+
+def test_find_third_party_brands_ignores_safe_generic_terms():
+    text = "Откройте BeatScope на Mac, экспортируйте в DJ-софт через USB, сохраните PDF-отчёт по BPM."
+    assert find_third_party_brands(text, "BeatScope") == []
+
+
+def test_check_article_rejects_third_party_brand_even_when_otherwise_clean():
+    md = sanitize_markdown(_article_markdown().replace("Опыт клиентов", "Опыт клиентов James Hype"), PROJECT)
+    result = check_article(title="Как быстро отвечать клиентам в WhatsApp", description="Описание статьи " * 5,
+                           tags=["a", "b", "c"], markdown=md, project=PROJECT, knowledge={}, min_chars=1500,
+                           max_chars=9000)
+    assert not result.ok
+    assert any("James Hype" in p for p in result.problems)
 
 
 def test_real_images_skips_icons_and_tiny_images():

@@ -157,9 +157,14 @@ def _prefetch_one(llm: LLM, db: Database, settings: Settings, project: dict) -> 
                 return False
 
     mined_titles = db.mined_titles(project["id"])
-    news_items = _safe_fetch_news(project["slug"])
+    # News-mode grounding is disabled after a live incident: even with a
+    # genuinely real source link, the writer fabricated specific claims
+    # about a named third party (a car maker's model launch) beyond what
+    # any headline states, and named that company directly - a hard "never"
+    # per the user. Evergreen-only until a version that discusses a real
+    # trend WITHOUT naming its subject is built and verified.
     added = topics_mod.ensure_topic_bank(llm, db, project, knowledge, mined_titles, minimum=6, batch=12,
-                                        news_items=news_items)
+                                        news_items=None)
     if added:
         log.info("project=%s topics_added=%s news_available=%s", project["slug"], added, len(news_items))
 

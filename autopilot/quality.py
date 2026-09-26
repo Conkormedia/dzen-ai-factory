@@ -10,6 +10,63 @@ LINK_RE = re.compile(r"\[([^\]]*)\]\((https?://[^)\s]+)\)")
 BARE_URL_RE = re.compile(r"(?<!\()https?://[^\s)\]]+")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 
+# Generic tech/platform vocabulary that legitimately appears in Russian
+# copy in Latin script — NOT third-party brand mentions. Everything else in
+# Latin, title-case script is treated as a probable brand/product/person
+# name and blocked outright: a real incident showed the writer inventing a
+# fabricated news claim about a named third-party company (AvtoVAZ/Lada)
+# despite an explicit prompt rule against it — this is the code-level
+# backstop, not just a prompt instruction.
+SAFE_LATIN_TERMS = {
+    "mac", "macos", "iphone", "ipad", "ios", "android", "windows", "linux", "api", "crm", "mcp",
+    "byok", "url", "seo", "dj", "usb", "wi-fi", "wifi", "pdf", "json", "html", "css", "sql", "id",
+    "faq", "cta", "bpm", "hz", "db", "mp3", "wav", "flac", "aiff", "camelot", "whatsapp", "telegram",
+    "x-api-key", "bearer", "hmac-sha256", "webhook", "webhooks",
+}
+_LATIN_PHRASE_RE = re.compile(r"\b[A-Z][a-zA-Z0-9]*(?:[\s\-][A-Z][a-zA-Z0-9]*){0,3}\b")
+
+
+def find_third_party_brands(markdown: str, project_name: str, extra_allowed: list[str] | None = None) -> list[str]:
+    """Best-effort detector for third-party brand/product/person names: brand
+    names in Russian-language copy are overwhelmingly kept in Latin script
+    (Lada Azimut, James Hype, Wildberries, Bitget, Air Canada, ...), so any
+    capitalized Latin word/phrase that isn't generic tech vocabulary, the
+    project's own name, or an explicitly allowed platform name is flagged."""
+    allowed = {w.lower() for w in SAFE_LATIN_TERMS}
+    allowed.update(w.lower() for w in re.findall(r"[a-zA-Z0-9]+", project_name))
+    for term in extra_allowed or []:
+        allowed.update(w.lower() for w in re.findall(r"[a-zA-Z0-9]+", term))
+
+    text = re.sub(r"```.*?```", " ", markdown, flags=re.S)
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)  # keep link labels, drop URLs
+    text = BARE_URL_RE.sub(" ", text)
+
+    found: list[str] = []
+    seen: set[str] = set()
+    for m in _LATIN_PHRASE_RE.finditer(text):
+        phrase = m.group(0).strip()
+        words = phrase.split()
+        if all(w.lower() in allowed for w in words):
+            continue
+        key = phrase.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(phrase)
+
+    # Russian typographic convention: an organization/brand name is very
+    # often set in «guillemets» (e.g. «АвтоВАЗ», «Сбербанк») — this catches
+    # Cyrillic-script brand names the Latin-only scan above can't see.
+    for m in re.finditer(r"«([^»]{2,40})»", text):
+        phrase = m.group(1).strip()
+        key = phrase.lower()
+        if key in allowed or key in seen or not re.search(r"[а-яёa-z]", key, re.I):
+            continue
+        seen.add(key)
+        found.append(f"«{phrase}»")
+    return found
+
+
 AI_CLICHES = [
     "в современном мире", "в заключение", "в наше время", "не секрет, что", "как известно",
     "давайте разберёмся", "давайте разберемся", "в данной статье", "в этой статье мы", "подводя итог",
@@ -169,6 +226,11 @@ def check_article(*, title: str, description: str, tags: list[str], markdown: st
     found = [c for c in competitors if c and len(c) >= 3 and c.lower() in lower_text]
     if found:
         problems.append("Упомянуты чужие сервисы: " + ", ".join(found))
+
+    # --- any other third-party brand/product/person -------------------------
+    brands = find_third_party_brands(markdown, project.get("name", ""), extra_allowed=competitors)
+    if brands:
+        problems.append("Упомянуты сторонние бренды/имена (запрещено): " + ", ".join(brands[:8]))
 
     # --- style --------------------------------------------------------------
     cliches = [c for c in AI_CLICHES if c in lower_text]

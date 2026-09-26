@@ -21,9 +21,21 @@ SAFE_LATIN_TERMS = {
     "mac", "macos", "iphone", "ipad", "ios", "android", "windows", "linux", "api", "crm", "mcp",
     "byok", "url", "seo", "dj", "usb", "wi-fi", "wifi", "pdf", "json", "html", "css", "sql", "id",
     "faq", "cta", "bpm", "hz", "db", "mp3", "wav", "flac", "aiff", "camelot", "whatsapp", "telegram",
-    "x-api-key", "bearer", "hmac-sha256", "webhook", "webhooks",
+    "x-api-key", "bearer", "hmac-sha256", "webhook", "webhooks", "web", "hmac", "sha256", "sha-256",
+    "sha", "aes", "tls", "ssl", "http", "https", "rest", "sdk", "cli", "ok", "oauth", "jwt", "ux", "ui",
+    "byte", "bytes", "kb", "mb", "gb", "ghz", "ram", "cpu", "gpu", "led",
 }
 _LATIN_PHRASE_RE = re.compile(r"\b[A-Z][a-zA-Z0-9]*(?:[\s\-][A-Z][a-zA-Z0-9]*){0,3}\b")
+# Only treat a quoted Cyrillic phrase as a probable organization name when it
+# sits near a reporting/announcement verb — quoted UI labels/button names
+# ("нажмите «Экспорт»", "статус «Готово»") are a false-positive-prone
+# pattern in how-to articles and must not be flagged.
+_REPORTING_VERB_RE = re.compile(
+    r"со(?:о|)бщ(ил|ила|ило|или|ает|ают)|заяв(ил|ила|ило|или|ляет|ляют)|объяв(ил|ила|ило|или|ляет|ляют)|"
+    r"анонс(ировал|ировала|ировало|ировали|ирует|ируют)|запуст(ил|ила|ило|или|ит|ят|ится|ились)|"
+    r"выпуст(ил|ила|ило|или|ит|ят)|представ(ил|ила|ило|или|ляет|ляют)|планир(ует|уют|овал|овала)",
+    re.I,
+)
 
 
 def find_third_party_brands(markdown: str, project_name: str, extra_allowed: list[str] | None = None) -> list[str]:
@@ -55,12 +67,18 @@ def find_third_party_brands(markdown: str, project_name: str, extra_allowed: lis
         found.append(phrase)
 
     # Russian typographic convention: an organization/brand name is very
-    # often set in «guillemets» (e.g. «АвтоВАЗ», «Сбербанк») — this catches
-    # Cyrillic-script brand names the Latin-only scan above can't see.
+    # often set in «guillemets» (e.g. «АвтоВАЗ» сообщил...) — this catches
+    # Cyrillic-script brand names the Latin-only scan above can't see. Only
+    # flagged near a reporting/announcement verb: how-to articles routinely
+    # quote their OWN UI labels/buttons the same typographic way (нажмите
+    # «Экспорт», статус «Готово»), which must not be flagged.
     for m in re.finditer(r"«([^»]{2,40})»", text):
         phrase = m.group(1).strip()
         key = phrase.lower()
         if key in allowed or key in seen or not re.search(r"[а-яёa-z]", key, re.I):
+            continue
+        window = text[max(0, m.start() - 60):m.end() + 60]
+        if not _REPORTING_VERB_RE.search(window):
             continue
         seen.add(key)
         found.append(f"«{phrase}»")

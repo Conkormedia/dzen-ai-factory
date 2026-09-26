@@ -139,13 +139,17 @@ def run(publication_id: str, image_path: str) -> None:
             if candidate:
                 box = candidate.bounding_box()
                 print("[diag] clicking candidate add-media icon at", box)
+                candidate.click(force=True, timeout=5000)
+                page.wait_for_timeout(800)
+                shot(page, "06-media-modal-opened")
+                upload_btn = page.get_by_text("Загрузите файл", exact=False)
                 with page.expect_file_chooser(timeout=8000) as fc_info:
-                    candidate.click(force=True, timeout=5000)
+                    upload_btn.click(force=True, timeout=5000)
                 chooser = fc_info.value
                 print("[diag] file chooser appeared, setting file:", image_path)
                 chooser.set_files(image_path)
                 page.wait_for_timeout(5000)
-                shot(page, "06-after-image-upload")
+                shot(page, "07-after-image-upload")
             else:
                 print("[diag] no candidate icon found by position; dumping all icon boxes")
                 for el in add_media_icons[:20]:

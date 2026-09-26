@@ -512,12 +512,34 @@ class DzenClient:
 
         self._page.get_by_role("button", name="Опубликовать").first.click(force=True, timeout=10000)
         self._page.wait_for_timeout(1500)
+        # First click opens a "Публикация" settings side panel with its OWN
+        # "Опубликовать" button paired next to "Опубликовать позже". DOM order
+        # doesn't match visual order (portal-rendered panel), so `.last` was
+        # unreliable - anchor on the unique "Опубликовать позже" text and
+        # click its sibling instead.
+        clicked_panel_button = False
         try:
-            again = self._page.get_by_role("button", name="Опубликовать").last
-            if again.is_visible(timeout=3000):
-                again.click(force=True, timeout=8000)
+            later_btn = self._page.get_by_role("button", name="Опубликовать позже")
+            if later_btn.is_visible(timeout=3000):
+                for depth in (1, 2, 3, 4):
+                    container = later_btn.locator(f"xpath=ancestor::*[{depth}]")
+                    panel_confirm = container.get_by_role("button", name="Опубликовать", exact=True)
+                    try:
+                        if panel_confirm.first.is_visible(timeout=1000):
+                            panel_confirm.first.click(force=True, timeout=8000)
+                            clicked_panel_button = True
+                            break
+                    except Exception:  # noqa: BLE001
+                        continue
         except Exception:  # noqa: BLE001
-            pass
+            log.exception("could not click confirm button next to 'Опубликовать позже'")
+        if not clicked_panel_button:
+            try:
+                again = self._page.get_by_role("button", name="Опубликовать").last
+                if again.is_visible(timeout=3000):
+                    again.click(force=True, timeout=8000)
+            except Exception:  # noqa: BLE001
+                pass
         self._page.wait_for_timeout(2500)
         final_url = self._page.url
         if "/a/" not in final_url:

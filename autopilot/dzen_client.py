@@ -172,7 +172,18 @@ class DzenClient:
                 body = self._page.inner_text("body")[:5000]
             except Exception:  # noqa: BLE001
                 pass
-            return self._interpret(url, body)
+            info = self._interpret(url, body)
+            if (publisher_id and info["logged_in"] and not info["need_channel"] and not info["captcha"]
+                    and not info["publisher_id"]):
+                # We navigated to THIS id's own URL ourselves; Dzen redirected
+                # to a different-but-equally-valid representation (e.g. a
+                # vanity URL like /profile/editor/<username> instead of
+                # /profile/editor/id/<hex>, which PUBLISHER_RE doesn't match).
+                # Landing on a normal, non-wizard, non-login page after that
+                # confirms the session for the id we asked about.
+                info["publisher_id"] = publisher_id
+                self.publisher_id = self.publisher_id or publisher_id
+            return info
         except Exception as exc:  # noqa: BLE001
             return {"logged_in": False, "publisher_id": "", "need_channel": False, "captcha": False,
                     "url": "", "error": str(exc)[:300]}

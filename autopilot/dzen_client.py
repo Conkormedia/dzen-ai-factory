@@ -542,19 +542,22 @@ class DzenClient:
         # unreliable - anchor on the unique "Опубликовать позже" text and
         # click its sibling instead.
         clicked_panel_button = False
+        panel_confirm_locator = None
         try:
             later_btn = self._page.get_by_role("button", name="Опубликовать позже")
             if later_btn.is_visible(timeout=3000):
                 for depth in (1, 2, 3, 4):
                     container = later_btn.locator(f"xpath=ancestor::*[{depth}]")
-                    panel_confirm = container.get_by_role("button", name="Опубликовать", exact=True)
+                    candidate = container.get_by_role("button", name="Опубликовать", exact=True)
                     try:
-                        if panel_confirm.first.is_visible(timeout=1000):
-                            panel_confirm.first.click(force=True, timeout=8000)
-                            clicked_panel_button = True
+                        if candidate.first.is_visible(timeout=1000):
+                            panel_confirm_locator = candidate.first
                             break
                     except Exception:  # noqa: BLE001
                         continue
+                if panel_confirm_locator is not None:
+                    panel_confirm_locator.click(force=True, timeout=8000)
+                    clicked_panel_button = True
         except Exception:  # noqa: BLE001
             log.exception("could not click confirm button next to 'Опубликовать позже'")
         if not clicked_panel_button:
@@ -569,8 +572,24 @@ class DzenClient:
         # rather than navigating the original edit tab - scan every open page.
         final_url = next((p.url for p in self._ctx.pages if "/a/" in p.url), self._page.url)
         if "/a/" not in final_url:
-            if self._has_captcha_text():
-                raise CaptchaRequired("Дзен показал капчу на публикации ('Я не робот') - нужен человек")
+            # A disabled confirm button is the reliable signal that a human
+            # gate (captcha checkbox, or anything else Dzen decides to block
+            # on) is up - clicking a disabled button is a silent no-op, which
+            # is indistinguishable from a real click failure otherwise. Text
+            # search for the captcha wording is a weaker fallback: Yandex's
+            # SmartCaptcha widget renders inside an iframe/canvas that isn't
+            # reliably reachable via a plain text locator.
+            blocked = False
+            if panel_confirm_locator is not None:
+                try:
+                    blocked = bool(
+                        panel_confirm_locator.get_attribute("disabled") is not None
+                        or panel_confirm_locator.get_attribute("aria-disabled") == "true"
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            if blocked or self._has_captcha_text():
+                raise CaptchaRequired("Панель публикации осталась заблокирована (капча/проверка) - нужен человек")
             raise DzenError(f"publish click did not navigate to a published article (url={final_url})")
         return final_url
 

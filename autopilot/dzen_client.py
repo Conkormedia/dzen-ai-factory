@@ -494,6 +494,18 @@ class DzenClient:
             pass
         return True
 
+    def _has_captcha_text(self) -> bool:
+        """Yandex's "не робот" checkbox renders inside an iframe (SmartCaptcha),
+        so page.get_by_text() alone (main frame only) never finds it - check
+        every frame, not just the top one."""
+        for frame in self._page.frames:  # includes the main frame itself
+            try:
+                if frame.get_by_text("не робот").is_visible(timeout=500):
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+        return False
+
     def publish_via_ui(self, publisher_id: str, publication_id: str, *, title: str, html_body: str,
                        plain_body: str, image_paths: list[Path], mode: str = "publish") -> str:
         """Returns the final article URL (for mode="publish") or the edit URL
@@ -557,7 +569,7 @@ class DzenClient:
         # rather than navigating the original edit tab - scan every open page.
         final_url = next((p.url for p in self._ctx.pages if "/a/" in p.url), self._page.url)
         if "/a/" not in final_url:
-            if self._page.get_by_text("не робот").is_visible(timeout=1000):
+            if self._has_captcha_text():
                 raise CaptchaRequired("Дзен показал капчу на публикации ('Я не робот') - нужен человек")
             raise DzenError(f"publish click did not navigate to a published article (url={final_url})")
         return final_url

@@ -121,14 +121,39 @@ def run(publication_id: str, image_path: str) -> None:
 
         shot(page, "05-before-image")
 
-        if file_inputs:
-            try:
-                fi = page.query_selector("input[type=file]")
-                fi.set_input_files(image_path)
-                page.wait_for_timeout(3000)
-                shot(page, "06-after-image-set-files")
-            except Exception as exc:  # noqa: BLE001
-                print("[diag] set_input_files failed:", exc)
+        # The small square icon next to the last (empty) paragraph is the
+        # add-media affordance (visible on the empty draft too, before any
+        # content). Click it and see what it reveals.
+        try:
+            add_media_icons = page.query_selector_all("svg, [class*='icon'], [class*='Icon']")
+            print(f"[diag] icon-ish elements near content: {len(add_media_icons)}")
+            # Prefer one positioned near the left margin, below the title (x<60, y<600ish).
+            candidate = None
+            for el in add_media_icons:
+                box = el.bounding_box()
+                if box and box["x"] < 60 and 100 < box["y"] < 700:
+                    candidate = el
+                    break
+            if candidate:
+                box = candidate.bounding_box()
+                print("[diag] clicking candidate add-media icon at", box)
+                with page.expect_file_chooser(timeout=8000) as fc_info:
+                    candidate.click(force=True, timeout=5000)
+                chooser = fc_info.value
+                print("[diag] file chooser appeared, setting file:", image_path)
+                chooser.set_files(image_path)
+                page.wait_for_timeout(5000)
+                shot(page, "06-after-image-upload")
+            else:
+                print("[diag] no candidate icon found by position; dumping all icon boxes")
+                for el in add_media_icons[:20]:
+                    print("  box:", el.bounding_box())
+        except Exception as exc:  # noqa: BLE001
+            print("[diag] add-media click failed:", type(exc).__name__, exc)
+            shot(page, "06-add-media-failed")
+
+        body_text2 = page.inner_text("body")
+        print("[diag] final visible text tail:", body_text2[-500:])
 
         print("[diag] done - inspect screenshots and the button/file-input dump above")
 

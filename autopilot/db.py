@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS topics (
   keywords_json TEXT NOT NULL DEFAULT '[]',
   outline_json TEXT NOT NULL DEFAULT '[]',
   cta_angle TEXT NOT NULL DEFAULT '',
+  source_title TEXT NOT NULL DEFAULT '',
+  source_link TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'new',
   score REAL NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
@@ -161,7 +163,16 @@ class Database:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.executescript(SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """CREATE TABLE IF NOT EXISTS doesn't add columns to an existing table —
+        add any columns introduced after the initial schema by hand."""
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(topics)").fetchall()}
+        for name, ddl in (("source_title", "TEXT NOT NULL DEFAULT ''"), ("source_link", "TEXT NOT NULL DEFAULT ''")):
+            if name not in cols:
+                self._conn.execute(f"ALTER TABLE topics ADD COLUMN {name} {ddl}")
 
     # ------------------------------------------------------------------ core
     @contextmanager
@@ -286,6 +297,15 @@ class Database:
              json.dumps(mined_titles, ensure_ascii=False), utcnow()),
         )
 
+    def site_pages(self, project_id: int) -> list[dict[str, Any]]:
+        row = self.one("SELECT site_pages_json FROM project_knowledge WHERE project_id=?", (project_id,))
+        if not row:
+            return []
+        try:
+            return list(json.loads(row["site_pages_json"] or "[]"))
+        except json.JSONDecodeError:
+            return []
+
     def mined_titles(self, project_id: int) -> list[str]:
         row = self.one("SELECT mined_titles_json FROM project_knowledge WHERE project_id=?", (project_id,))
         if not row:
@@ -303,13 +323,15 @@ class Database:
             for t in topics:
                 c.execute(
                     """
-                    INSERT INTO topics(project_id,title,format,pain,promise,keywords_json,outline_json,cta_angle,status,score,created_at)
-                    VALUES(?,?,?,?,?,?,?,?,'new',?,?)
+                    INSERT INTO topics(project_id,title,format,pain,promise,keywords_json,outline_json,cta_angle,
+                                       source_title,source_link,status,score,created_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,'new',?,?)
                     """,
                     (project_id, t["title"], t.get("format", ""), t.get("pain", ""), t.get("promise", ""),
                      json.dumps(t.get("keywords", []), ensure_ascii=False),
                      json.dumps(t.get("outline", []), ensure_ascii=False),
-                     t.get("cta_angle", ""), float(t.get("score", 0) or 0), now),
+                     t.get("cta_angle", ""), t.get("source_title", ""), t.get("source_link", ""),
+                     float(t.get("score", 0) or 0), now),
                 )
                 added += 1
         return added

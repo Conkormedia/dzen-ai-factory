@@ -18,6 +18,7 @@ from .config import Settings, settings as default_settings
 from .db import Database
 from .dzen_client import CaptchaRequired, DzenClient, DzenError, NoChannel, SessionExpired, publish_full_article
 from .llm import LLM, LLMError
+from .news_sources import fetch_recent_news
 from .research import run_research
 from .telegram import InvalidToken, Telegram, capture_chat_id
 
@@ -135,6 +136,14 @@ def _days_old(iso_ts: str | None) -> float:
     return (datetime.now(timezone.utc) - ts).total_seconds() / 86400.0
 
 
+def _safe_fetch_news(project_slug: str) -> list[dict]:
+    try:
+        return fetch_recent_news(project_slug)
+    except Exception:  # noqa: BLE001
+        log.exception("news fetch failed for %s", project_slug)
+        return []
+
+
 def _prefetch_one(llm: LLM, db: Database, settings: Settings, project: dict) -> bool:
     knowledge = db.knowledge(project["id"])
     stale = (not knowledge) or (_days_old(knowledge.get("_updated_at")) > KNOWLEDGE_MAX_AGE_DAYS)
@@ -147,9 +156,11 @@ def _prefetch_one(llm: LLM, db: Database, settings: Settings, project: dict) -> 
                 return False
 
     mined_titles = db.mined_titles(project["id"])
-    added = topics_mod.ensure_topic_bank(llm, db, project, knowledge, mined_titles, minimum=6, batch=12)
+    news_items = _safe_fetch_news(project["slug"])
+    added = topics_mod.ensure_topic_bank(llm, db, project, knowledge, mined_titles, minimum=6, batch=12,
+                                        news_items=news_items)
     if added:
-        log.info("project=%s topics_added=%s", project["slug"], added)
+        log.info("project=%s topics_added=%s news_available=%s", project["slug"], added, len(news_items))
 
     topic = db.claim_topic(project["id"])
     if not topic:
@@ -167,19 +178,24 @@ def _prefetch_one(llm: LLM, db: Database, settings: Settings, project: dict) -> 
         db.add_run("write", "failed", project_id=project["id"], note=str(topic["title"])[:200])
         return False
 
+    # Real images only, pulled from the brand's own crawled site pages — no
+    # generated/stock substitute. Zero found is fine; the article just
+    # publishes without one rather than with a synthetic cover.
     out_dir = settings.images_dir / project["slug"]
-    cover_path = images.make_cover(article["title"], project["name"], project["slug"], out_dir)
-    inline_paths: list[Path] = []
-    if settings.images_per_article > 0:
-        sections = images.section_headings(article["markdown"])
-        inline_paths = images.make_inline_images(
-            article["title"], sections, project["name"], project["slug"], out_dir, settings.images_per_article,
-        )
+    site_pages = db.site_pages(project["id"])
+    wanted = 1 + max(0, settings.images_per_article)
+    found = images.pick_real_images(site_pages, article["title"], out_dir, count=wanted)
+    cover_path = found[0] if found else None
+    inline_paths: list[Path] = found[1:]
+    if not found:
+        log.info("project=%s no real images found on the brand's own site; publishing without one",
+                 project["slug"])
 
     db.add_article(
         project["id"], topic["id"], title=article["title"], description=article["description"],
         tags=article["tags"], markdown=article["markdown"], quality=article["quality"],
-        cover_path=str(cover_path), images=[{"path": str(p)} for p in inline_paths], status="ready",
+        cover_path=str(cover_path) if cover_path else "", images=[{"path": str(p)} for p in inline_paths],
+        status="ready",
     )
     db.finish_topic(topic["id"], "used")
     db.add_run("write", "ok", project_id=project["id"], note=article["title"][:200])

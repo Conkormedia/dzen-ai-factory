@@ -9,9 +9,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from autopilot.db import Database
 from autopilot.draftjs import build_content_state, markdown_to_html, snippet, utf16_len
+from autopilot.images import collect_real_image_urls
 from autopilot.llm import extract_json
 from autopilot.quality import allowed_domains, check_article, plain_text, sanitize_markdown
-from autopilot.topics import _too_similar
+from autopilot.research import _real_images
+from autopilot.topics import _too_similar, generate_topics
+from bs4 import BeautifulSoup
 
 PROJECT = {"name": "BizGateWay", "slug": "bizgateway", "url": "https://bizgateway.pro", "extra_domains": ""}
 
@@ -148,6 +151,65 @@ def test_too_similar_catches_near_duplicate_titles():
 def test_plain_text_drops_markup():
     text = plain_text("## Заголовок\n\n**Жирный** текст с [ссылкой](https://x.com) и `код`.")
     assert "#" not in text and "**" not in text and "[" not in text
+
+
+def test_real_images_skips_icons_and_tiny_images():
+    html = """
+    <html><body>
+      <img src="/logo.png" width="600" height="400">
+      <img src="/content/photo.jpg" width="800" height="500">
+      <img src="/icons/favicon.ico" width="800" height="500">
+      <img src="/tiny.jpg" width="50" height="50">
+      <img src="/no-size.jpg">
+    </body></html>
+    """
+    soup = BeautifulSoup(html, "lxml")
+    urls = _real_images(soup, "https://bizgateway.pro/blog/post")
+    assert urls == [
+        "https://bizgateway.pro/content/photo.jpg",
+        "https://bizgateway.pro/no-size.jpg",
+    ]
+
+
+def test_collect_real_image_urls_dedupes_across_pages_and_respects_limit():
+    pages = [
+        {"images": ["https://x.com/a.jpg", "https://x.com/b.jpg"]},
+        {"images": ["https://x.com/b.jpg", "https://x.com/c.jpg"]},
+    ]
+    assert collect_real_image_urls(pages) == ["https://x.com/a.jpg", "https://x.com/b.jpg", "https://x.com/c.jpg"]
+    assert collect_real_image_urls(pages, limit=2) == ["https://x.com/a.jpg", "https://x.com/b.jpg"]
+
+
+class _StubLLM:
+    """Minimal stand-in for autopilot.llm.LLM — generate_topics only calls .json()."""
+
+    def __init__(self, response):
+        self._response = response
+
+    def json(self, *args, **kwargs):
+        return self._response
+
+
+def test_generate_topics_news_mode_drops_topics_without_a_real_source():
+    news = [{"title": "New WhatsApp API limits announced", "link": "https://techcrunch.com/a",
+            "summary": "...", "source": "techcrunch.com", "published": "2026-09-20T00:00:00+00:00"}]
+    llm = _StubLLM([
+        {"title": "Что значат новые лимиты WhatsApp API для бизнеса", "format": "новость",
+         "source_title": news[0]["title"], "source_link": news[0]["link"], "score": 80},
+        {"title": "Придуманная тема без реального источника", "format": "новость",
+         "source_title": "Придумано", "source_link": "https://not-a-real-source.example/x", "score": 90},
+    ])
+    result = generate_topics(llm, {"name": "BizGateWay", "url": "https://bizgateway.pro"}, {}, [], [],
+                             count=5, news_items=news)
+    assert len(result) == 1
+    assert result[0]["source_link"] == news[0]["link"]
+
+
+def test_generate_topics_evergreen_mode_allows_empty_source():
+    llm = _StubLLM([{"title": "Эволюционная тема без новостного повода", "format": "боль-решение", "score": 70}])
+    result = generate_topics(llm, {"name": "BeatScope", "url": "https://beatscope.pro"}, {}, [], [], count=5,
+                             news_items=[])
+    assert len(result) == 1 and result[0]["source_link"] == ""
 
 
 def test_db_round_trip_project_topic_article():

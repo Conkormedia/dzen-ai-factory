@@ -34,8 +34,44 @@ def fetch(url: str, timeout: int = 25) -> requests.Response | None:
         return None
 
 
+_ICONISH_RE = re.compile(r"logo|icon|favicon|sprite|avatar|badge|pixel|spacer|placeholder", re.I)
+
+
+def _real_images(soup: BeautifulSoup, page_url: str) -> list[str]:
+    """Real content-image URLs from the page — used later so articles can
+    carry a genuine image from the brand's own site instead of a generated
+    one. Skips obvious logos/icons/tracking pixels and tiny/data-URI images."""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(src: str) -> None:
+        if not src or src.startswith("data:"):
+            return
+        full = urljoin(page_url, src)
+        if full in seen or _ICONISH_RE.search(full):
+            return
+        seen.add(full)
+        out.append(full)
+
+    og = soup.find("meta", attrs={"property": "og:image"})
+    if og and og.get("content"):
+        add(str(og["content"]))
+    for img in soup.find_all("img"):
+        src = img.get("src") or img.get("data-src") or ""
+        try:
+            w = int(str(img.get("width") or 0))
+            h = int(str(img.get("height") or 0))
+        except ValueError:
+            w = h = 0
+        if (w and w < 200) or (h and h < 200):
+            continue
+        add(str(src))
+    return out[:8]
+
+
 def extract_page(html: str, url: str) -> dict[str, Any]:
     soup = BeautifulSoup(html, "lxml")
+    images = _real_images(soup, url)
     for tag in soup(["script", "style", "noscript", "svg", "iframe", "form"]):
         tag.decompose()
     title = (soup.title.string.strip() if soup.title and soup.title.string else "")[:200]
@@ -46,7 +82,8 @@ def extract_page(html: str, url: str) -> dict[str, Any]:
     headings = [h.get_text(" ", strip=True) for h in soup.find_all(["h1", "h2", "h3"])][:40]
     main = soup.find("main") or soup.find("article") or soup.body or soup
     text = re.sub(r"\s+", " ", main.get_text(" ", strip=True)) if main else ""
-    return {"url": url, "title": title, "description": desc, "headings": headings, "text": text[:6000]}
+    return {"url": url, "title": title, "description": desc, "headings": headings, "text": text[:6000],
+            "images": images}
 
 
 def _sitemap_urls(base: str, limit: int = 300) -> list[str]:
@@ -221,7 +258,11 @@ def run_research(llm: Any, db: Any, project: dict[str, Any], *, max_pages: int =
             knowledge["competitor_topic_samples"] = mined[:80]
     knowledge["site_pages_count"] = len(pages)
     knowledge["site_reachable"] = bool(pages)
-    db.save_knowledge(project["id"], knowledge, [{"url": p["url"], "title": p["title"]} for p in pages], mined)
+    db.save_knowledge(
+        project["id"], knowledge,
+        [{"url": p["url"], "title": p["title"], "images": p.get("images", [])} for p in pages],
+        mined,
+    )
     db.log_event(f"Исследование «{project['name']}»: страниц {len(pages)}, заголовков рынка {len(mined)}, "
                  f"конкурентов в стоп-листе {len(knowledge.get('competitors', []))}", kind="research")
     return knowledge

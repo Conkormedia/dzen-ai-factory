@@ -110,12 +110,17 @@ def run() -> None:
             while time.time() < deadline:
                 time.sleep(POLL_SECONDS)
                 try:
-                    url = client._page.url  # noqa: SLF001
+                    # The final "Опубликовать" click can land the published
+                    # article in a NEW tab rather than navigating the original
+                    # edit tab - scan every open page in the context, not just
+                    # the one we started on.
+                    urls = [p.url for p in client._ctx.pages]  # noqa: SLF001
                 except Exception:  # noqa: BLE001
                     print("[manual] page/context gone (window closed?) - stopping")
                     break
-                if "/a/" in url:
-                    published_url = url
+                match = next((u for u in urls if "/a/" in u), "")
+                if match:
+                    published_url = match
                     break
 
         if published_url:

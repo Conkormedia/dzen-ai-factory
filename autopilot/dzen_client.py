@@ -541,8 +541,12 @@ class DzenClient:
             except Exception:  # noqa: BLE001
                 pass
         self._page.wait_for_timeout(2500)
-        final_url = self._page.url
+        # The confirm click can land the published article in a NEW tab
+        # rather than navigating the original edit tab - scan every open page.
+        final_url = next((p.url for p in self._ctx.pages if "/a/" in p.url), self._page.url)
         if "/a/" not in final_url:
+            if self._page.get_by_text("не робот").is_visible(timeout=1000):
+                raise CaptchaRequired("Дзен показал капчу на публикации ('Я не робот') - нужен человек")
             raise DzenError(f"publish click did not navigate to a published article (url={final_url})")
         return final_url
 

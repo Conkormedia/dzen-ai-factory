@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
-from .draftjs import build_content_state, snippet as md_snippet
+from .draftjs import markdown_to_html
 
 log = logging.getLogger(__name__)
 
@@ -390,39 +390,137 @@ class DzenClient:
         except Exception:  # noqa: BLE001
             pass
 
+    # ------------------------------------------------------- UI-driven publish
+    # update-publication-content(-and-publish) needs a real anti-bot "fp"
+    # token that only Dzen's own client-side JS computes (confirmed by
+    # diffing our raw request against a real one, see NOTES_ON_PUBLISHING.md).
+    # Rather than extract-and-replay that token, drive the actual editor UI —
+    # paste rich content, upload images through its own upload panel, click
+    # its own Опубликовать button — so the browser sends its own genuine
+    # request. Selectors below were found by inspecting screenshots of the
+    # real editor (see diag_ui_publish.py) and may need updating if Dzen
+    # redesigns the editor.
+    def _dismiss_help_overlay(self) -> None:
+        try:
+            self._page.keyboard.press("Escape")
+            overlay = self._page.query_selector("[class*='help-popup__overlay']")
+            if overlay and overlay.is_visible():
+                overlay.click(force=True, position={"x": 5, "y": 5}, timeout=5000)
+                self._page.wait_for_timeout(500)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _paste_html(self, element: Any, html: str, plain: str) -> None:
+        element.click(force=True, timeout=10000)
+        self._page.keyboard.press("Control+a")
+        self._page.evaluate(
+            """async ({html, text}) => {
+                const item = new ClipboardItem({
+                  'text/html': new Blob([html], {type: 'text/html'}),
+                  'text/plain': new Blob([text], {type: 'text/plain'}),
+                });
+                await navigator.clipboard.write([item]);
+            }""",
+            {"html": html, "text": plain},
+        )
+        self._page.keyboard.press("Control+v")
+        self._page.wait_for_timeout(800)
+
+    def _find_add_media_icon(self) -> Any:
+        """The add-media affordance is a distinctive 28x28 icon that tracks the
+        current trailing empty paragraph; other icons on the page are header
+        controls (different sizes) or off-screen menu items (negative y)."""
+        for el in self._page.query_selector_all("svg, [class*='icon'], [class*='Icon']"):
+            box = el.bounding_box()
+            if box and 26 <= box["width"] <= 32 and 26 <= box["height"] <= 32 and 100 < box["y"] < 4000:
+                return el
+        return None
+
+    def _insert_image_via_ui(self, path: Path) -> bool:
+        icon = self._find_add_media_icon()
+        if not icon:
+            return False
+        icon.click(force=True, timeout=5000)
+        self._page.wait_for_timeout(600)
+        upload_btn = self._page.get_by_text("Загрузите файл", exact=False)
+        try:
+            with self._page.expect_file_chooser(timeout=8000) as fc_info:
+                upload_btn.click(force=True, timeout=5000)
+            fc_info.value.set_files(str(path))
+        except Exception:
+            log.exception("image upload panel did not behave as expected for %s", path)
+            return False
+        self._page.wait_for_timeout(4000)
+        try:
+            close_x = self._page.query_selector("[class*='close']")
+            if close_x and close_x.is_visible():
+                close_x.click(force=True, timeout=2000)
+                self._page.wait_for_timeout(300)
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
+    def publish_via_ui(self, publisher_id: str, publication_id: str, *, title: str, html_body: str,
+                       plain_body: str, image_paths: list[Path], mode: str = "publish") -> str:
+        """Returns the final article URL (for mode="publish") or the edit URL
+        (for mode="draft", left saved-but-unpublished by the editor's own
+        autosave). Raises DzenError if the publish click didn't land."""
+        self._ctx.grant_permissions(["clipboard-read", "clipboard-write"])
+        edit_url = f"{EDITOR}/id/{publisher_id}/{publication_id}/edit"
+        self._page.goto(edit_url, wait_until="networkidle", timeout=45000)
+        self._page.wait_for_timeout(2000)
+        self._dismiss_help_overlay()
+
+        editables = self._page.query_selector_all("[contenteditable='true']")
+        if len(editables) < 2:
+            raise DzenError("editor page did not render the expected title/body fields")
+        self._paste_html(editables[0], f"<p>{title}</p>", title)
+        self._paste_html(editables[1], html_body, plain_body)
+        self._page.wait_for_timeout(1000)
+
+        for path in image_paths:
+            if Path(path).is_file() and not self._insert_image_via_ui(Path(path)):
+                log.warning("could not insert image via UI: %s", path)
+
+        self._page.wait_for_timeout(1500)  # let the trailing autosave land
+
+        if mode != "publish":
+            return edit_url
+
+        self._page.get_by_role("button", name="Опубликовать").first.click(force=True, timeout=10000)
+        self._page.wait_for_timeout(1500)
+        try:
+            again = self._page.get_by_role("button", name="Опубликовать").last
+            if again.is_visible(timeout=3000):
+                again.click(force=True, timeout=8000)
+        except Exception:  # noqa: BLE001
+            pass
+        self._page.wait_for_timeout(2500)
+        final_url = self._page.url
+        if "/a/" not in final_url:
+            raise DzenError(f"publish click did not navigate to a published article (url={final_url})")
+        return final_url
+
 
 def publish_full_article(client: "DzenClient", publisher_id: str, *, title: str, markdown: str,
                          description: str, tags: list[str], cover_path: Path | None,
                          inline_image_paths: list[Path], mode: str = "publish") -> dict[str, Any]:
-    """Creates a draft, uploads cover + inline images, writes Draft.js content, publishes.
-
-    Returns {"publication_id", "url", "mode"}. Raises SessionExpired/CaptchaRequired/
-    NoChannel/DzenError — callers decide how to react (retry, pause, alert).
+    """Creates a draft via the API (no fp needed there), then drives the real
+    editor UI for content + images + the publish click itself (fp IS needed
+    there — see publish_via_ui). Returns {"publication_id", "url", "mode"}.
+    Raises SessionExpired/CaptchaRequired/NoChannel/DzenError — callers decide
+    how to react (retry, pause, alert).
     """
     publication_id = client.create_draft(publisher_id)
     log.info("Dzen draft created id=%s title=%r", publication_id, title)
 
-    cover_id = ""
-    if cover_path and Path(cover_path).is_file():
-        try:
-            cover_id = client.upload_image(publisher_id, publication_id, cover_path)
-        except DzenError:
-            log.exception("cover upload failed, publishing without a preview image")
+    images = [p for p in ([cover_path] if cover_path else []) + list(inline_image_paths) if p and Path(p).is_file()]
+    html_body = markdown_to_html(markdown)
+    plain_body = re.sub(r"<[^>]+>", " ", html_body)
 
-    image_ids: list[str] = []
-    for path in inline_image_paths:
-        if not Path(path).is_file():
-            continue
-        try:
-            image_ids.append(client.upload_image(publisher_id, publication_id, path))
-            time.sleep(0.4)  # be gentle with the editor's upload pipeline
-        except DzenError:
-            log.exception("inline image upload failed for %s", path)
-
-    content_state = build_content_state(markdown, image_ids)
-    url = client.publish(
-        publisher_id, publication_id, title=title, snippet=description or md_snippet(markdown),
-        content_state=content_state, cover_image_id=cover_id, tags=tags, mode=mode,
+    url = client.publish_via_ui(
+        publisher_id, publication_id, title=title, html_body=html_body, plain_body=plain_body,
+        image_paths=images, mode=mode,
     )
     log.info("Dzen publish ok id=%s mode=%s url=%s", publication_id, mode, url)
     return {"publication_id": publication_id, "url": url, "mode": mode}

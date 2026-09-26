@@ -15,6 +15,7 @@ import os
 import secrets
 import signal
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +45,7 @@ class _Proc:
 
 
 def run() -> None:
+    sys.stdout.reconfigure(line_buffering=True)
     db = Database(settings.db_path)
     publisher_id = db.get_setting("dzen_publisher_id", "")
     if not publisher_id:

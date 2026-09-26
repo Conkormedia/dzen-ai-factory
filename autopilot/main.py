@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -248,11 +249,42 @@ def _publish_one(db: Database, settings: Settings, tg: Telegram, client: DzenCli
         return False
 
 
+def _prefetch_batch(llm: LLM, db: Database, settings: Settings, projects: list[dict], now: datetime) -> None:
+    """Research/topic-gen/write are pure LLM+HTTP calls (no browser) — run as
+    many as are actually needed right now CONCURRENTLY, across every project
+    at once, instead of one project/article at a time. Bounded by
+    settings.write_concurrency so this speeds things up without just
+    hammering the shared free-tier pool harder."""
+    jobs: list[dict] = []
+    for project in projects:
+        ready = db.count_articles(project["id"], "ready")
+        published_today = _published_today(db, project["id"], settings, now)
+        remaining_quota = max(0, project["daily_quota"] - published_today)
+        needed = max(0, min(settings.queue_depth - ready, remaining_quota))
+        jobs.extend([project] * needed)
+
+    if not jobs:
+        return
+    workers = max(1, min(len(jobs), settings.write_concurrency))
+    log.info("prefetch batch: %s job(s) across %s project(s), %s worker(s)",
+             len(jobs), len({j['id'] for j in jobs}), workers)
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="prefetch") as pool:
+        futures = {pool.submit(_prefetch_one, llm, db, settings, project): project for project in jobs}
+        for future in as_completed(futures):
+            project = futures[future]
+            try:
+                future.result()
+            except Exception:  # noqa: BLE001 - isolate one job's crash from the rest of the batch
+                log.exception("prefetch job crashed for project %s", project.get("slug"))
+                db.log_event(f"Prefetch job crashed for {project.get('slug')}", kind="tick", level="error")
+
+
 def run_forever(settings: Settings, db: Database, tg: Telegram, llm: LLM, publisher_id: str) -> None:
     tg.safe_send(
         "🚀 Автопилот запущен.\n"
         f"Проекты: {', '.join(p['name'] for p in db.projects(only_active=True))}\n"
-        f"Режим публикации: {settings.publish_mode} · окно {settings.window_start}-{settings.window_end} МСК."
+        f"Режим публикации: {settings.publish_mode} · окно {settings.window_start}-{settings.window_end} МСК · "
+        f"параллельно пишем до {settings.write_concurrency}."
     )
     last_stats_refresh = 0.0
     with DzenClient(settings) as client:
@@ -260,15 +292,21 @@ def run_forever(settings: Settings, db: Database, tg: Telegram, llm: LLM, publis
             now = datetime.now(timezone.utc)
             cooldown = int(db.get_setting("dzen_cooldown_until", "0") or 0)
             in_cooldown = cooldown > time.time()
+            active_projects = db.projects(only_active=True)
 
-            for project in db.projects(only_active=True):
+            try:
+                _prefetch_batch(llm, db, settings, active_projects, now)
+            except (SessionExpired, NoChannel):
+                raise
+            except Exception:  # noqa: BLE001
+                log.exception("prefetch batch failed")
+                db.log_event("Prefetch batch failed", kind="tick", level="error")
+
+            for project in active_projects:
                 try:
                     fraction = _today_window(settings, now)
                     target = project["daily_quota"] * fraction
                     published_today = _published_today(db, project["id"], settings, now)
-
-                    if db.count_articles(project["id"], "ready") < settings.queue_depth and published_today < project["daily_quota"]:
-                        _prefetch_one(llm, db, settings, project)
 
                     if (settings.publish_mode != "off" and not in_cooldown
                             and published_today < target and published_today < project["daily_quota"]):
@@ -277,8 +315,8 @@ def run_forever(settings: Settings, db: Database, tg: Telegram, llm: LLM, publis
                 except (SessionExpired, NoChannel):
                     raise
                 except Exception:  # noqa: BLE001
-                    log.exception("tick failed for project %s", project.get("slug"))
-                    db.log_event(f"Tick failed for {project.get('slug')}", kind="tick", level="error")
+                    log.exception("publish tick failed for project %s", project.get("slug"))
+                    db.log_event(f"Publish tick failed for {project.get('slug')}", kind="tick", level="error")
 
             db.release_stale_claims()
 

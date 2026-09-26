@@ -73,6 +73,14 @@ class Settings:
     report_hour: int = field(default_factory=lambda: _int("REPORT_HOUR", 21))
     # How many ready articles per project the generator keeps ahead.
     queue_depth: int = field(default_factory=lambda: _int("QUEUE_DEPTH", 4))
+    # Research/topic/write calls are pure LLM+HTTP (no browser) and safe to
+    # run concurrently across projects and articles — publishing stays
+    # single-threaded (one real browser session; parallel UI automation
+    # there would look like an anti-bot attack to Dzen, not a speed win).
+    # A literal "30 at once" would just hammer the shared OpenRouter free
+    # pool harder and produce more 429s; this caps it at something that
+    # actually helps.
+    write_concurrency: int = field(default_factory=lambda: _int("WRITE_CONCURRENCY", 6))
 
     # --- Article shape -----------------------------------------------------
     article_min_chars: int = field(default_factory=lambda: _int("ARTICLE_MIN_CHARS", 3000))

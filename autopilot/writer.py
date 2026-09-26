@@ -106,8 +106,13 @@ def write_article(llm: LLM, project: dict, topic: dict, knowledge: dict, *,
             primary_keyword=(topic.get("keywords") or [""])[0],
         )
         data["markdown"] = clean_md
-        if quality.ok or attempt == MAX_REPAIR_ATTEMPTS:
+        if quality.ok:
             return {**data, "quality": quality.as_dict()}
+        if attempt == MAX_REPAIR_ATTEMPTS:
+            raise LLMError(
+                f"Статья не прошла контроль качества после {MAX_REPAIR_ATTEMPTS} попыток исправления: "
+                + "; ".join(quality.problems)
+            )
         log.info("Article failed quality gate (attempt %s): %s", attempt, quality.problems)
         data = _repair(llm, project, data, quality.problems + quality.warnings, min_chars, max_chars)
 

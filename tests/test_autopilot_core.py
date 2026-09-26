@@ -5,15 +5,18 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from autopilot.db import Database
 from autopilot.draftjs import build_content_state, markdown_to_html, snippet, utf16_len
 from autopilot.images import collect_real_image_urls
-from autopilot.llm import extract_json
+from autopilot.llm import LLMError, extract_json
 from autopilot.quality import allowed_domains, check_article, find_third_party_brands, plain_text, sanitize_markdown
 from autopilot.research import _real_images
 from autopilot.topics import _too_similar, generate_topics
+from autopilot.writer import write_article
 from bs4 import BeautifulSoup
 
 PROJECT = {"name": "BizGateWay", "slug": "bizgateway", "url": "https://bizgateway.pro", "extra_domains": ""}
@@ -179,6 +182,31 @@ def test_check_article_rejects_third_party_brand_even_when_otherwise_clean():
                            max_chars=9000)
     assert not result.ok
     assert any("James Hype" in p for p in result.problems)
+
+
+class _FakeLLMAlwaysBrandViolation:
+    """Never fixes the brand mention, no matter how many repair rounds run."""
+
+    def json(self, *args, **kwargs):
+        return {
+            "title": "Тестовый заголовок статьи для проверки",
+            "description": "Описание статьи " * 5,
+            "tags": ["a", "b", "c"],
+            "markdown": _article_markdown().replace("Опыт клиентов", "Опыт клиентов James Hype"),
+        }
+
+
+def test_write_article_raises_after_exhausting_repairs_on_persistent_violation():
+    # Regression: write_article's own docstring promises it raises LLMError
+    # when the gate still fails after MAX_REPAIR_ATTEMPTS - the code used to
+    # silently return the still-violating article on the last attempt instead,
+    # which meant a brand-safety failure the LLM couldn't fix could reach the
+    # publish queue unblocked.
+    topic = {"title": "Тема", "format": "", "pain": "", "promise": "", "keywords": ["слово"],
+              "outline": [], "cta_angle": ""}
+    with pytest.raises(LLMError):
+        write_article(_FakeLLMAlwaysBrandViolation(), PROJECT, topic, knowledge={},
+                      min_chars=100, target_chars=1500, max_chars=9000)
 
 
 def test_real_images_skips_icons_and_tiny_images():

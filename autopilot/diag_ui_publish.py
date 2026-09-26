@@ -161,6 +161,38 @@ def run(publication_id: str, image_path: str) -> None:
         body_text2 = page.inner_text("body")
         print("[diag] final visible text tail:", body_text2[-500:])
 
+        # Owner explicitly authorized publishing this test draft live (and will
+        # delete it themselves afterward) - proceed.
+        try:
+            close_x = page.query_selector("[class*='close']")
+            if close_x and close_x.is_visible():
+                close_x.click(force=True, timeout=3000)
+                page.wait_for_timeout(500)
+        except Exception:  # noqa: BLE001
+            pass
+
+        print("[diag] clicking Опубликовать...")
+        try:
+            page.get_by_role("button", name="Опубликовать").first.click(force=True, timeout=8000)
+            page.wait_for_timeout(1500)
+            shot(page, "08-after-publish-click")
+            confirm_buttons = page.eval_on_selector_all(
+                "button, [role='button']",
+                "els => els.map(e => e.innerText.trim()).filter(t => t.length && t.length < 40)",
+            )
+            print("[diag] buttons after first publish click:", json.dumps(sorted(set(confirm_buttons)), ensure_ascii=False))
+            again = page.get_by_role("button", name="Опубликовать").last
+            if again.is_visible(timeout=3000):
+                again.click(force=True, timeout=5000)
+                page.wait_for_timeout(3000)
+        except Exception as exc:  # noqa: BLE001
+            print("[diag] publish click failed:", type(exc).__name__, exc)
+
+        page.wait_for_timeout(2500)
+        shot(page, "09-final-state")
+        print("[diag] final url:", page.url)
+        print("[diag] final visible text tail 2:", page.inner_text("body")[-800:])
+
         print("[diag] done - inspect screenshots and the button/file-input dump above")
 
 

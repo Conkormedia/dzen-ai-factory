@@ -127,11 +127,13 @@ def run(publication_id: str, image_path: str) -> None:
         try:
             add_media_icons = page.query_selector_all("svg, [class*='icon'], [class*='Icon']")
             print(f"[diag] icon-ish elements near content: {len(add_media_icons)}")
-            # Prefer one positioned near the left margin, below the title (x<60, y<600ish).
+            # The add-media icon is a distinctive 28x28 square, visible even on the
+            # empty draft (confirmed via screenshot) - other icons on this page are
+            # header controls (different sizes) or off-screen dropdown items (y<0).
             candidate = None
             for el in add_media_icons:
                 box = el.bounding_box()
-                if box and box["x"] < 60 and 100 < box["y"] < 700:
+                if box and 26 <= box["width"] <= 32 and 26 <= box["height"] <= 32 and 100 < box["y"] < 700:
                     candidate = el
                     break
             if candidate:

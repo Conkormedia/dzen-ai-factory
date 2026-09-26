@@ -137,19 +137,31 @@ class DzenClient:
             self.publisher_id = self.publisher_id or m.group(1)
             return info
         # Logged in but no channel yet (creation wizard), or an unknown page.
+        # Specific channel-creation-wizard copy only — "editor" or "канал"
+        # appearing anywhere (true on nearly every dzen.ru page) is not
+        # evidence of anything; a slow SPA redirect must not read as this.
         if "dzen.ru" in url and ("Войти" not in body[:800]):
             info["logged_in"] = True
-            info["need_channel"] = "editor" in url or "create" in url or "канал" in body.lower()
+            info["need_channel"] = any(
+                phrase in body for phrase in ("Название канала", "Создать канал", "Заведите канал", "Создайте канал")
+            )
         return info
 
-    def check_session(self) -> dict[str, Any]:
+    def check_session(self, publisher_id: str = "") -> dict[str, Any]:
         """Force-navigate to the editor and interpret the result. Only safe to call
         when nothing else may be driving the SAME page (e.g. headless re-checks) —
         for polling *during* a human-driven login, use peek_session() instead, which
-        never navigates and so can't race the person's own clicks/redirects."""
+        never navigates and so can't race the person's own clicks/redirects.
+
+        Pass a known publisher_id when you have one: navigating straight to
+        that channel's editor URL confirms the session directly, instead of
+        relying on the bare /profile/editor page redirecting there itself
+        (that redirect can be slow enough to time out our own wait loop,
+        which reads as "no channel" even though the session is fine)."""
+        target = f"{EDITOR}/id/{publisher_id}" if publisher_id else EDITOR
         try:
-            url = self.goto(EDITOR, wait_ms=4000)
-            for _ in range(6):  # SPA redirects can take a moment
+            url = self.goto(target, wait_ms=4000)
+            for _ in range(8):  # SPA redirects can take a moment
                 m = PUBLISHER_RE.search(url)
                 if m or "passport" in url or "showcaptcha" in url:
                     break

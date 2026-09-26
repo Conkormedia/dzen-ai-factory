@@ -56,7 +56,7 @@ def ensure_login(settings: Settings, db, tg: Telegram) -> str:
     if publisher_id and db.get_setting("dzen_login_complete", "") == "1":
         try:
             with DzenClient(settings) as client:
-                info = client.check_session()
+                info = client.check_session(publisher_id)
             if info.get("logged_in") and info.get("publisher_id"):
                 return info["publisher_id"]
             log.warning("saved Dzen session no longer valid (%s); re-opening login portal", info)

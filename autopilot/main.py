@@ -22,6 +22,7 @@ from .llm import LLM, LLMError
 from .news_sources import fetch_recent_news
 from .research import run_research
 from .telegram import InvalidToken, Telegram, capture_chat_id
+from .vnc_portal import VncPortal
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
                     stream=sys.stdout)
@@ -166,7 +167,7 @@ def _prefetch_one(llm: LLM, db: Database, settings: Settings, project: dict) -> 
     added = topics_mod.ensure_topic_bank(llm, db, project, knowledge, mined_titles, minimum=6, batch=12,
                                         news_items=None)
     if added:
-        log.info("project=%s topics_added=%s news_available=%s", project["slug"], added, len(news_items))
+        log.info("project=%s topics_added=%s", project["slug"], added)
 
     topic = db.claim_topic(project["id"])
     if not topic:
@@ -209,8 +210,12 @@ def _prefetch_one(llm: LLM, db: Database, settings: Settings, project: dict) -> 
     return True
 
 
+CAPTCHA_COOLDOWN_SECONDS = 300
+CAPTCHA_NOTIFY_EVERY_SECONDS = 600
+
+
 def _publish_one(db: Database, settings: Settings, tg: Telegram, client: DzenClient, publisher_id: str,
-                 project: dict) -> bool:
+                 project: dict, portal: VncPortal) -> bool:
     article = db.claim_article(project["id"])
     if not article:
         return False
@@ -235,9 +240,12 @@ def _publish_one(db: Database, settings: Settings, tg: Telegram, client: DzenCli
         return True
     except CaptchaRequired as exc:
         db.update_article(article["id"], status="ready", last_error=str(exc))
-        db.set_setting("dzen_cooldown_until", str(int(time.time()) + 3600))
+        db.set_setting("dzen_cooldown_until", str(int(time.time()) + CAPTCHA_COOLDOWN_SECONDS))
         db.add_run("publish", "failed", project_id=project["id"], article_id=article["id"], note=str(exc)[:200])
-        tg.safe_send("⏸ Дзен запросил проверку — публикация на паузе час, потом попробую снова.")
+        last_notify = int(db.get_setting("dzen_captcha_last_notify", "0") or 0)
+        if time.time() - last_notify > CAPTCHA_NOTIFY_EVERY_SECONDS:
+            db.set_setting("dzen_captcha_last_notify", str(int(time.time())))
+            tg.safe_send("⏸ Дзен запросил проверку «Я не робот» на публикации.\n" + portal.message())
         return False
     except (SessionExpired, NoChannel):
         db.update_article(article["id"], status="ready", last_error="dzen session expired")
@@ -285,58 +293,68 @@ def _prefetch_batch(llm: LLM, db: Database, settings: Settings, projects: list[d
 
 
 def run_forever(settings: Settings, db: Database, tg: Telegram, llm: LLM, publisher_id: str) -> None:
+    portal = VncPortal(settings)
+    portal.start()
+    os.environ["DISPLAY"] = settings.login_display
+    headed_settings = Settings(**{**settings.__dict__, "headless": False})
+
     tg.safe_send(
         "🚀 Автопилот запущен.\n"
         f"Проекты: {', '.join(p['name'] for p in db.projects(only_active=True))}\n"
         f"Режим публикации: {settings.publish_mode} · окно {settings.window_start}-{settings.window_end} МСК · "
-        f"параллельно пишем до {settings.write_concurrency}."
+        f"параллельно пишем до {settings.write_concurrency}.\n"
+        + ("📱 Капча на публикации придёт ссылкой сюда (Tailscale)." if portal.via_tailscale
+           else "⚠️ Tailscale не поднят — при капче придётся заходить через SSH-туннель.")
     )
     last_stats_refresh = 0.0
-    with DzenClient(settings) as client:
-        while True:
-            now = datetime.now(timezone.utc)
-            cooldown = int(db.get_setting("dzen_cooldown_until", "0") or 0)
-            in_cooldown = cooldown > time.time()
-            active_projects = db.projects(only_active=True)
+    try:
+        with DzenClient(headed_settings) as client:
+            while True:
+                now = datetime.now(timezone.utc)
+                cooldown = int(db.get_setting("dzen_cooldown_until", "0") or 0)
+                in_cooldown = cooldown > time.time()
+                active_projects = db.projects(only_active=True)
 
-            try:
-                _prefetch_batch(llm, db, settings, active_projects, now)
-            except (SessionExpired, NoChannel):
-                raise
-            except Exception:  # noqa: BLE001
-                log.exception("prefetch batch failed")
-                db.log_event("Prefetch batch failed", kind="tick", level="error")
-
-            for project in active_projects:
                 try:
-                    fraction = _today_window(settings, now)
-                    target = project["daily_quota"] * fraction
-                    published_today = _published_today(db, project["id"], settings, now)
-
-                    if (settings.publish_mode != "off" and not in_cooldown
-                            and published_today < target and published_today < project["daily_quota"]):
-                        if db.ready_articles(project["id"]):
-                            _publish_one(db, settings, tg, client, publisher_id, project)
+                    _prefetch_batch(llm, db, settings, active_projects, now)
                 except (SessionExpired, NoChannel):
                     raise
                 except Exception:  # noqa: BLE001
-                    log.exception("publish tick failed for project %s", project.get("slug"))
-                    db.log_event(f"Publish tick failed for {project.get('slug')}", kind="tick", level="error")
+                    log.exception("prefetch batch failed")
+                    db.log_event("Prefetch batch failed", kind="tick", level="error")
 
-            db.release_stale_claims()
+                for project in active_projects:
+                    try:
+                        fraction = _today_window(settings, now)
+                        target = project["daily_quota"] * fraction
+                        published_today = _published_today(db, project["id"], settings, now)
 
-            if time.time() - last_stats_refresh > STATS_REFRESH_SECONDS:
-                _refresh_stats(db, client, publisher_id)
-                last_stats_refresh = time.time()
+                        if (settings.publish_mode != "off" and not in_cooldown
+                                and published_today < target and published_today < project["daily_quota"]):
+                            if db.ready_articles(project["id"]):
+                                _publish_one(db, settings, tg, client, publisher_id, project, portal)
+                    except (SessionExpired, NoChannel):
+                        raise
+                    except Exception:  # noqa: BLE001
+                        log.exception("publish tick failed for project %s", project.get("slug"))
+                        db.log_event(f"Publish tick failed for {project.get('slug')}", kind="tick", level="error")
 
-            local_now = now.astimezone(settings.tz)
-            if local_now.hour == settings.report_hour:
-                try:
-                    reports.build_and_send(db, tg, settings, now=local_now)
-                except Exception:  # noqa: BLE001
-                    log.exception("daily report failed")
+                db.release_stale_claims()
 
-            time.sleep(TICK_SECONDS)
+                if time.time() - last_stats_refresh > STATS_REFRESH_SECONDS:
+                    _refresh_stats(db, client, publisher_id)
+                    last_stats_refresh = time.time()
+
+                local_now = now.astimezone(settings.tz)
+                if local_now.hour == settings.report_hour:
+                    try:
+                        reports.build_and_send(db, tg, settings, now=local_now)
+                    except Exception:  # noqa: BLE001
+                        log.exception("daily report failed")
+
+                time.sleep(TICK_SECONDS)
+    finally:
+        portal.stop()
 
 
 def _refresh_stats(db: Database, client: DzenClient, publisher_id: str) -> None:

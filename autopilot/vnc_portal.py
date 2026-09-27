@@ -55,7 +55,7 @@ class VncPortal:
 
     def _vnc_args(self) -> list[str]:
         s = self.settings
-        return ["x11vnc", "-display", s.login_display, "-forever", "-shared", "-quiet",
+        return ["x11vnc", "-display", s.login_display, "-localhost", "-forever", "-shared", "-quiet",
                 "-rfbport", str(s.login_vnc_port), "-passwd", self.password]
 
     def _ws_args(self) -> list[str]:

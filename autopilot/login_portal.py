@@ -78,7 +78,7 @@ def _run_login_portal(settings: Settings, db, tg: Telegram) -> str:
         time.sleep(1.5)
         procs.append(_Proc(
             "x11vnc",
-            ["x11vnc", "-display", settings.login_display, "-forever", "-shared", "-quiet",
+            ["x11vnc", "-display", settings.login_display, "-localhost", "-forever", "-shared", "-quiet",
              "-rfbport", str(settings.login_vnc_port), "-passwd", password],
         ))
         time.sleep(1.0)

@@ -459,6 +459,8 @@ def test_vnc_portal_respawns_dead_x11vnc_with_same_password(monkeypatch):
     started.clear()
     assert portal.ensure_alive() == ["x11vnc"]
     assert started and started[0][0] == "x11vnc" and portal.password in started[0]
+    # VNC must never listen publicly - only websockify (bound to Tailscale) reaches it
+    assert "-localhost" in started[0]
 
     portal._xvfb._alive = False
     assert portal.ensure_alive() == ["xvfb"]

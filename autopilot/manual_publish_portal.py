@@ -78,7 +78,7 @@ def run() -> None:
         procs.append(_Proc("xvfb", ["Xvfb", settings.login_display, "-screen", "0", "1366x850x24",
                                      "-nolisten", "tcp"]))
         time.sleep(1.5)
-        procs.append(_Proc("x11vnc", ["x11vnc", "-display", settings.login_display, "-forever", "-shared",
+        procs.append(_Proc("x11vnc", ["x11vnc", "-display", settings.login_display, "-localhost", "-forever", "-shared",
                                        "-quiet", "-rfbport", str(settings.login_vnc_port), "-passwd", password]))
         time.sleep(1.0)
         procs.append(_Proc("websockify", ["websockify", "--web", settings.novnc_web_root,

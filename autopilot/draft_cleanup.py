@@ -128,7 +128,7 @@ def delete_drafts(client: DzenClient, publisher_id: str, draft_ids: list[str],
     return deleted
 
 
-def orphan_draft_ids(db: Database, drafts: list[dict[str, Any]], now_ms: int) -> list[str]:
+def orphan_draft_ids(db: Database, drafts: list[dict[str, Any]], now_ms: int, *, everything: bool = False) -> list[str]:
     """Drafts the pipeline created that no article is going to reuse: title
     matches one of our articles, or it's an empty draft (created, never
     filled) old enough that nobody is typing into it. Drafts written by hand
@@ -141,6 +141,9 @@ def orphan_draft_ids(db: Database, drafts: list[dict[str, Any]], now_ms: int) ->
     for d in drafts:
         if d["id"] in keep:
             continue
+        if everything:  # owner asked for a full clear: all but the drafts queued articles reuse
+            out.append(d["id"])
+            continue
         added = d.get("add_time")
         age_ms = now_ms - int(added) if added is not None else 0
         empty_and_old = not d["title"] and age_ms > EMPTY_DRAFT_MIN_AGE_S * 1000
@@ -150,8 +153,9 @@ def orphan_draft_ids(db: Database, drafts: list[dict[str, Any]], now_ms: int) ->
     return out
 
 
-def sweep_orphan_drafts(db: Database, client: DzenClient, publisher_id: str, *, max_deletes: int = 10) -> int:
-    ids = orphan_draft_ids(db, list_drafts(client, publisher_id), int(time.time() * 1000))
+def sweep_orphan_drafts(db: Database, client: DzenClient, publisher_id: str, *, max_deletes: int = 10,
+                        everything: bool = False) -> int:
+    ids = orphan_draft_ids(db, list_drafts(client, publisher_id), int(time.time() * 1000), everything=everything)
     return delete_drafts(client, publisher_id, ids, max_deletes=max_deletes) if ids else 0
 
 

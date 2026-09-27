@@ -432,8 +432,12 @@ def run_forever(settings: Settings, db: Database, tg: Telegram, llm: LLM, publis
                 if (not in_cooldown and time.time() >= next_sweep_at and publish_queue.gate_get(db) is None
                         and (next_at - time.time() > 120 or settings.publish_mode == "off")):
                     try:
+                        # dzen_sweep_all_until (unix time): one-off "clear every draft"
+                        # window the owner asked for; otherwise only pipeline orphans
+                        everything = time.time() < float(db.get_setting("dzen_sweep_all_until", "0") or 0)
                         swept = draft_cleanup.sweep_orphan_drafts(db, client, publisher_id,
-                                                                  max_deletes=DRAFT_SWEEP_MAX_PER_TICK)
+                                                                  max_deletes=DRAFT_SWEEP_MAX_PER_TICK,
+                                                                  everything=everything)
                         if swept:
                             log.info("draft sweep: deleted %s orphaned drafts", swept)
                         else:

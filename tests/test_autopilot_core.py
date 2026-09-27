@@ -380,6 +380,9 @@ def test_orphan_draft_ids_spares_hand_written_kept_and_fresh_empty_drafts():
             {"id": "d1", "title": "Диагностика 3 паблиша", "add_time": now_ms},
         ]
         assert draft_cleanup.orphan_draft_ids(db, drafts, now_ms) == ["o1", "q2", "e_old", "d1"]
+        # full-clear mode takes hand-written ones too, but never a queued article's draft
+        assert draft_cleanup.orphan_draft_ids(db, drafts, now_ms, everything=True) == [
+            "o1", "q2", "h1", "e_old", "e_new", "d1"]
 
 
 def test_pick_project_prefers_furthest_behind_quota():

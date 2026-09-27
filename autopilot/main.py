@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import images, login_portal, reports
+from . import draft_cleanup, images, login_portal, reports
 from . import topics as topics_mod
 from . import writer
 from .config import Settings, settings as default_settings
@@ -29,6 +29,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("autopilot.main")
 
 TICK_SECONDS = 90
+DRAFT_SWEEP_SECONDS = 1800
+DRAFT_SWEEP_MAX = 10
 KNOWLEDGE_MAX_AGE_DAYS = 14
 STATS_REFRESH_SECONDS = 3600
 
@@ -335,6 +337,7 @@ def run_forever(settings: Settings, db: Database, tg: Telegram, llm: LLM, publis
            else "⚠️ Tailscale не поднят — при капче придётся заходить через SSH-туннель.")
     )
     last_stats_refresh = 0.0
+    last_draft_sweep = 0.0
     try:
         with DzenClient(headed_settings) as client:
             while True:
@@ -366,6 +369,19 @@ def run_forever(settings: Settings, db: Database, tg: Telegram, llm: LLM, publis
                     except Exception:  # noqa: BLE001
                         log.exception("publish tick failed for project %s", project.get("slug"))
                         db.log_event(f"Publish tick failed for {project.get('slug')}", kind="tick", level="error")
+
+                if not in_cooldown and time.time() - last_draft_sweep > DRAFT_SWEEP_SECONDS:
+                    last_draft_sweep = time.time()
+                    try:
+                        swept = draft_cleanup.sweep_orphan_drafts(db, client, publisher_id,
+                                                                  max_deletes=DRAFT_SWEEP_MAX)
+                        if swept:
+                            log.info("draft sweep: deleted %s orphaned drafts", swept)
+                    except CaptchaRequired:
+                        db.set_setting("dzen_cooldown_until", str(int(time.time()) + CAPTCHA_COOLDOWN_SECONDS))
+                        log.warning("draft sweep hit a captcha - pausing Dzen actions")
+                    except Exception:  # noqa: BLE001
+                        log.exception("draft sweep failed")
 
                 db.release_stale_claims()
 

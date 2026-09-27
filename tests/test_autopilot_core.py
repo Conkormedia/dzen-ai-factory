@@ -358,3 +358,27 @@ def test_publish_does_not_loop_when_fresh_draft_is_unavailable():
     with pytest.raises(DraftUnavailable):
         _publish(client)
     assert client.created == ["new1"]
+
+
+def test_sweep_orphan_drafts_spares_hand_written_and_kept_drafts(monkeypatch):
+    from autopilot import draft_cleanup
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "t.db")
+        project = db.upsert_project("p", "P", "https://p.example", "brief")
+        ids = {t: db.add_article(project["id"], None, title=t, description="d", tags=[], markdown="m",
+                                 quality={}, cover_path="", images=[]) for t in ("Orphan", "Queued")}
+        db.update_article(ids["Queued"], dzen_publication_id="keep1")
+
+        drafts = [
+            {"id": "o1", "title": "Orphan", "add_time": 3},
+            {"id": "keep1", "title": "Queued", "add_time": 2},
+            {"id": "q2", "title": "Queued", "add_time": 1},
+            {"id": "h1", "title": "Мой черновик вручную", "add_time": 4},
+        ]
+        seen: list[str] = []
+        monkeypatch.setattr(draft_cleanup, "list_drafts", lambda client, pid: drafts)
+        monkeypatch.setattr(draft_cleanup, "delete_drafts",
+                            lambda client, pid, ds, max_deletes=None: seen.extend(d["id"] for d in ds) or len(ds))
+        assert draft_cleanup.sweep_orphan_drafts(db, object(), "pub") == 1
+        assert seen == ["o1"]

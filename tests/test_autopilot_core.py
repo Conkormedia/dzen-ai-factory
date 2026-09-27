@@ -1,6 +1,8 @@
 """Fast, no-network unit tests for the pure-logic parts of the autopilot."""
 from __future__ import annotations
 
+import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -14,10 +16,11 @@ from autopilot.draftjs import build_content_state, markdown_to_html, snippet, ut
 from autopilot.dzen_client import DraftUnavailable, publish_full_article
 from autopilot.images import collect_real_image_urls
 from autopilot.llm import LLMError, extract_json
+from autopilot.positioning import LIST_KEYS, apply_owner, owner_directives
 from autopilot.quality import allowed_domains, check_article, find_third_party_brands, plain_text, sanitize_markdown
 from autopilot.research import _real_images
 from autopilot.topics import _too_similar, generate_topics
-from autopilot.writer import write_article
+from autopilot.writer import _topic_brief, write_article
 from bs4 import BeautifulSoup
 
 PROJECT = {"name": "BizGateWay", "slug": "bizgateway", "url": "https://bizgateway.pro", "extra_domains": ""}
@@ -176,6 +179,16 @@ def test_find_third_party_brands_ignores_safe_generic_terms():
     assert find_third_party_brands(text, "BeatScope") == []
 
 
+def test_find_third_party_brands_ignores_login_and_concierge_vocabulary():
+    text = ("OTP-код в WhatsApp вместо SMS: Email с кодом уходит в спам, PIN забывают. "
+            "VIP-зал, SPA-отель, проверка тарифа в GDS. POST-запрос с заголовком X-Signature уходит в ERP.")
+    assert find_third_party_brands(text, "BizGateWay") == []
+
+
+def test_find_third_party_brands_catches_lowercase_styled_brands():
+    assert find_third_party_brands("Теги подхватывает rekordbox и Serato.", "BeatScope") == ["Serato", "rekordbox"]
+
+
 def test_check_article_rejects_third_party_brand_even_when_otherwise_clean():
     md = sanitize_markdown(_article_markdown().replace("Опыт клиентов", "Опыт клиентов James Hype"), PROJECT)
     result = check_article(title="Как быстро отвечать клиентам в WhatsApp", description="Описание статьи " * 5,
@@ -287,6 +300,74 @@ def test_generate_topics_evergreen_mode_allows_empty_source():
     result = generate_topics(llm, {"name": "BeatScope", "url": "https://beatscope.pro"}, {}, [], [], count=5,
                              news_items=[])
     assert len(result) == 1 and result[0]["source_link"] == ""
+
+
+def _owner_project(owner) -> dict:
+    return {"name": "PRIO Concierge", "slug": "prio", "url": "https://prio.example",
+            "owner_json": owner if isinstance(owner, str) else json.dumps(owner, ensure_ascii=False)}
+
+
+def test_apply_owner_puts_owner_first_replaces_and_drops_contradictions():
+    knowledge = {"summary": "дешёвые туры", "facts": ["сервис существует с 2019 года", "скидка 42 %"],
+                 "audience": ["семьи"], "content_pillars": ["обзоры перевозчиков"],
+                 "competitors": [{"name": "X"}]}
+    project = _owner_project({"summary": "личный ассистент в поездках", "facts": ["работаем более 3 лет"],
+                              "audience": ["предприниматели", "семьи"], "content_pillars": ["деловые поездки"],
+                              "replace": ["content_pillars"], "drop_patterns": ["2019"]})
+    merged = apply_owner(knowledge, project)
+    assert merged["summary"] == "личный ассистент в поездках"
+    assert merged["facts"] == ["работаем более 3 лет", "скидка 42 %"]
+    assert merged["audience"] == ["предприниматели", "семьи"]
+    assert merged["content_pillars"] == ["деловые поездки"]
+    assert merged["competitors"] == [{"name": "X"}]
+    assert knowledge["facts"][0].endswith("2019 года")  # the stored dossier itself is untouched
+
+
+def test_apply_owner_is_a_no_op_without_valid_owner_block():
+    knowledge = {"facts": ["a"]}
+    assert apply_owner(knowledge, {"slug": "p"}) == knowledge
+    assert apply_owner(knowledge, _owner_project("{broken")) == knowledge
+    assert owner_directives(_owner_project("{broken")) == ""
+
+
+def test_owner_directives_reach_topic_and_article_prompts():
+    project = _owner_project({"focus": "OTP — это вход клиентов через WhatsApp",
+                              "avoid": ["подавать OTP как защиту аккаунтов"]})
+    seen = {}
+
+    class _CapturingLLM:
+        def json(self, system, prompt, **kwargs):
+            seen["prompt"] = prompt
+            return []
+
+    generate_topics(_CapturingLLM(), project, {}, [], [], count=3)
+    brief = _topic_brief(project, {"title": "Тема"}, {})
+    for text in (seen["prompt"], brief):
+        assert "ПОЗИЦИОНИРОВАНИЕ ОТ ВЛАДЕЛЬЦА" in text
+        assert "OTP — это вход клиентов через WhatsApp" in text
+        assert "- подавать OTP как защиту аккаунтов" in text
+
+
+def test_seed_owner_blocks_are_valid_and_brand_free():
+    seed = json.loads((Path(__file__).resolve().parents[1] / "autopilot" / "projects.seed.json").read_text("utf-8"))
+    for item in seed:
+        owner = item.get("owner") or {}
+        assert set(owner) <= {"summary", "tone", "focus", "avoid", "replace", "drop_patterns", *LIST_KEYS}
+        for pattern in owner.get("drop_patterns") or []:
+            re.compile(pattern)
+        text = json.dumps(owner, ensure_ascii=False) + " " + item.get("brief", "")
+        assert find_third_party_brands(text, item["name"]) == [], item["slug"]
+
+
+def test_owner_json_round_trips_and_knowledge_can_be_marked_stale():
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "t.db")
+        project = db.upsert_project("p", "P", "https://p.example", "brief", owner_json='{"focus": "x"}')
+        assert json.loads(project["owner_json"]) == {"focus": "x"}
+        db.save_knowledge(project["id"], {"facts": ["a"]}, [], [])
+        db.mark_knowledge_stale(project["id"])
+        knowledge = db.knowledge(project["id"])
+        assert knowledge["facts"] == ["a"] and knowledge["_updated_at"].startswith("1970-")
 
 
 def test_db_round_trip_project_topic_article():

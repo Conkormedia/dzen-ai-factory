@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 
 from .llm import LLM, LLMError
+from .positioning import owner_directives
 from .quality import check_article, sanitize_markdown
 
 log = logging.getLogger(__name__)
@@ -59,6 +60,7 @@ def _topic_brief(project: dict, topic: dict, knowledge: dict) -> str:
         f"ПРОДВИГАЕМЫЙ СЕРВИС: {project['name']}\n"
         f"Официальный сайт (единственный разрешённый домен для ссылок, помимо строк ниже): {project.get('url', '')}\n"
         f"Суть сервиса: {knowledge.get('summary', '')}\n"
+        f"{owner_directives(project)}"
         f"Ценности: {', '.join(knowledge.get('value_props', []) or [])}\n"
         f"Фичи, которые можно упоминать: {', '.join(knowledge.get('features', []) or [])}\n"
         f"Проверенные факты (используй ТОЛЬКО их для цифр/конкретики, не выдумывай новые): {facts}\n"

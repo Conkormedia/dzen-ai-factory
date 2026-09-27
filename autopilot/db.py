@@ -173,6 +173,9 @@ class Database:
         for name, ddl in (("source_title", "TEXT NOT NULL DEFAULT ''"), ("source_link", "TEXT NOT NULL DEFAULT ''")):
             if name not in cols:
                 self._conn.execute(f"ALTER TABLE topics ADD COLUMN {name} {ddl}")
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(projects)").fetchall()}
+        if "owner_json" not in cols:
+            self._conn.execute("ALTER TABLE projects ADD COLUMN owner_json TEXT NOT NULL DEFAULT '{}'")
 
     # ------------------------------------------------------------------ core
     @contextmanager
@@ -236,18 +239,19 @@ class Database:
     # -------------------------------------------------------------- projects
     def upsert_project(self, slug: str, name: str, url: str, brief: str, *,
                        daily_quota: int = 10, status: str = "active",
-                       extra_domains: str = "", tone: str = "") -> dict[str, Any]:
+                       extra_domains: str = "", tone: str = "", owner_json: str = "{}") -> dict[str, Any]:
         now = utcnow()
         self.execute(
             """
-            INSERT INTO projects(slug,name,url,brief,status,daily_quota,extra_domains,tone,created_at,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO projects(slug,name,url,brief,status,daily_quota,extra_domains,tone,owner_json,
+                                 created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(slug) DO UPDATE SET
               name=excluded.name, url=excluded.url, brief=excluded.brief,
               daily_quota=excluded.daily_quota, extra_domains=excluded.extra_domains,
-              tone=excluded.tone, updated_at=excluded.updated_at
+              tone=excluded.tone, owner_json=excluded.owner_json, updated_at=excluded.updated_at
             """,
-            (slug, name, url, brief, status, daily_quota, extra_domains, tone, now, now),
+            (slug, name, url, brief, status, daily_quota, extra_domains, tone, owner_json, now, now),
         )
         return self.project(slug)  # type: ignore[return-value]
 
@@ -296,6 +300,12 @@ class Database:
             (project_id, json.dumps(knowledge, ensure_ascii=False), json.dumps(site_pages, ensure_ascii=False),
              json.dumps(mined_titles, ensure_ascii=False), utcnow()),
         )
+
+    def mark_knowledge_stale(self, project_id: int) -> None:
+        """Forces a re-research on the next prefetch while keeping the current
+        dossier as a fallback if that research fails."""
+        self.execute("UPDATE project_knowledge SET updated_at=? WHERE project_id=?",
+                     ("1970-01-01T00:00:00+00:00", project_id))
 
     def site_pages(self, project_id: int) -> list[dict[str, Any]]:
         row = self.one("SELECT site_pages_json FROM project_knowledge WHERE project_id=?", (project_id,))

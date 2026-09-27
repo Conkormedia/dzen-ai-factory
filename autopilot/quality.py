@@ -24,8 +24,15 @@ SAFE_LATIN_TERMS = {
     "x-api-key", "bearer", "hmac-sha256", "webhook", "webhooks", "web", "hmac", "sha256", "sha-256",
     "sha", "aes", "tls", "ssl", "http", "https", "rest", "sdk", "cli", "ok", "oauth", "jwt", "ux", "ui",
     "byte", "bytes", "kb", "mb", "gb", "ghz", "ram", "cpu", "gpu", "led",
+    # login-by-code and travel-concierge vocabulary (customer auth via
+    # WhatsApp vs SMS/email; VIP lounges, SPA hotels, GDS fare checks)
+    "otp", "sms", "email", "e-mail", "pin", "sim", "esim", "push", "qr", "captcha", "vip", "spa", "gds",
+    # HTTP methods/headers and business-system acronyms from API how-tos
+    "get", "post", "put", "patch", "signature", "x-signature", "x-event", "erp",
 }
 _LATIN_PHRASE_RE = re.compile(r"\b[A-Z][a-zA-Z0-9]*(?:[\s\-][A-Z][a-zA-Z0-9]*){0,3}\b")
+# Brands styled all-lowercase slip past the capitalized scan above.
+_LOWERCASE_BRAND_RE = re.compile(r"\b(rekordbox|djay)\b")
 # Only treat a quoted Cyrillic phrase as a probable organization name when it
 # sits near a reporting/announcement verb — quoted UI labels/button names
 # ("нажмите «Экспорт»", "статус «Готово»") are a false-positive-prone
@@ -67,6 +74,10 @@ def find_third_party_brands(markdown: str, project_name: str, extra_allowed: lis
             continue
         seen.add(key)
         found.append(phrase)
+    for m in _LOWERCASE_BRAND_RE.finditer(text):
+        if m.group(1) not in seen and m.group(1) not in allowed:
+            seen.add(m.group(1))
+            found.append(m.group(1))
 
     # Russian typographic convention: an organization/brand name is very
     # often set in «guillemets» (e.g. «АвтоВАЗ» сообщил...) — this catches

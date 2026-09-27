@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import draft_cleanup, images, login_portal, publish_queue, reports
+from . import draft_cleanup, images, login_portal, positioning, publish_queue, reports
 from . import topics as topics_mod
 from . import writer
 from .config import Settings, settings as default_settings
@@ -46,10 +46,17 @@ def seed_projects(db: Database, settings: Settings) -> None:
         log.exception("projects.seed.json is invalid, skipping seed")
         return
     for item in seed:
-        db.upsert_project(
+        before = db.project(item["slug"])
+        project = db.upsert_project(
             item["slug"], item["name"], item.get("url", ""), item.get("brief", ""),
             daily_quota=int(item.get("daily_quota", 10)), tone=item.get("tone", ""),
+            owner_json=json.dumps(item.get("owner") or {}, ensure_ascii=False),
         )
+        # The dossier was built from the old brief - rebuild it so its summary,
+        # pillars and facts follow what the owner says now.
+        if before and before["brief"] != project["brief"]:
+            db.mark_knowledge_stale(project["id"])
+            log.info("brief changed for %s - knowledge will be re-researched", project["slug"])
     log.info("seeded/updated %s projects", len(seed))
 
 
@@ -159,6 +166,7 @@ def _prefetch_one(llm: LLM, db: Database, settings: Settings, project: dict) -> 
             log.exception("research failed for %s", project["slug"])
             if not knowledge:
                 return False
+    knowledge = positioning.apply_owner(knowledge, project)
 
     mined_titles = db.mined_titles(project["id"])
     # News-mode grounding is disabled after a live incident: even with a

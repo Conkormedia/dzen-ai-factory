@@ -6,6 +6,7 @@ import logging
 import re
 
 from .llm import LLM
+from .positioning import owner_directives
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +59,8 @@ def generate_topics(llm: LLM, project: dict, knowledge: dict, mined_titles: list
         f"    {n.get('summary', '')[:250]}\n    Ссылка: {n['link']}"
         for i, n in enumerate(news[:40], 1)
     ) or "(за последние дни релевантных новостей не нашлось)"
+    directives = owner_directives(project)
+    owner_block = f"{directives}\n" if directives else ""
 
     news_instruction = (
         f"РЕЖИМ: НОВОСТИ. Ниже — реальные свежие материалы отрасли. Для КАЖДОЙ темы возьми ОДИН конкретный\n"
@@ -82,6 +85,7 @@ def generate_topics(llm: LLM, project: dict, knowledge: dict, mined_titles: list
         f"Возражения клиентов: {'; '.join(knowledge.get('objections', []) or [])}\n"
         f"Контентные направления: {pillars or '(не заданы)'}\n"
         f"SEO-кластеры: {clusters or '(не заданы)'}\n\n"
+        f"{owner_block}"
         f"{news_instruction}"
         f"Заголовки статей конкурентов и рынка — ТОЛЬКО как источник вдохновения по темам,\n"
         f"конкурентов по имени упоминать в статьях НЕЛЬЗЯ:\n{inspiration}\n\n"

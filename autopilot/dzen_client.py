@@ -618,18 +618,21 @@ class DzenClient:
         return final_url
 
 
-def publish_full_article(client: "DzenClient", publisher_id: str, *, title: str, markdown: str,
-                         description: str, tags: list[str], cover_path: Path | None,
+def publish_full_article(client: "DzenClient", publisher_id: str, publication_id: str, *, title: str,
+                         markdown: str, description: str, tags: list[str], cover_path: Path | None,
                          inline_image_paths: list[Path], mode: str = "publish") -> dict[str, Any]:
-    """Creates a draft via the API (no fp needed there), then drives the real
-    editor UI for content + images + the publish click itself (fp IS needed
-    there — see publish_via_ui). Returns {"publication_id", "url", "mode"}.
+    """Drives the real editor UI for an ALREADY-CREATED draft: content +
+    images + the publish click itself (fp IS needed there — see
+    publish_via_ui). Returns {"publication_id", "url", "mode"}.
     Raises SessionExpired/CaptchaRequired/NoChannel/DzenError — callers decide
     how to react (retry, pause, alert).
-    """
-    publication_id = client.create_draft(publisher_id)
-    log.info("Dzen draft created id=%s title=%r", publication_id, title)
 
+    The caller creates (or reuses) publication_id and persists it BEFORE
+    calling this - a live incident showed every retry calling create_draft
+    fresh left behind an orphaned draft each time (hundreds accumulated
+    across one captcha-blocked night), since this UI step is exactly the
+    one that can fail/crash.
+    """
     images = [p for p in ([cover_path] if cover_path else []) + list(inline_image_paths) if p and Path(p).is_file()]
     html_body = markdown_to_html(markdown)
     plain_body = re.sub(r"<[^>]+>", " ", html_body)

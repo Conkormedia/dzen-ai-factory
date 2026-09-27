@@ -227,6 +227,26 @@ def test_real_images_skips_icons_and_tiny_images():
     ]
 
 
+def test_real_images_skips_og_meta_and_brand_mark_files():
+    # Regression: a live site's og:image was an unreplaced template default
+    # (a "Website Template" promo image) present on every single crawled
+    # page, so it deterministically became the cover of nearly every
+    # article. og:image is a site-wide social-preview tag, not page content,
+    # and should never be scraped as a content image; "mark-navy.png"-style
+    # wordmark files are logos too, just not caught by the old logo/icon regex.
+    html = """
+    <html><head>
+      <meta property="og:image" content="/website-template-OG.webp">
+    </head><body>
+      <img src="/img/mark-navy.png" width="400" height="400">
+      <img src="/content/hotel-pool.jpg" width="1200" height="630">
+    </body></html>
+    """
+    soup = BeautifulSoup(html, "lxml")
+    urls = _real_images(soup, "https://book.prioconcierge.ru/offers")
+    assert urls == ["https://book.prioconcierge.ru/content/hotel-pool.jpg"]
+
+
 def test_collect_real_image_urls_dedupes_across_pages_and_respects_limit():
     pages = [
         {"images": ["https://x.com/a.jpg", "https://x.com/b.jpg"]},

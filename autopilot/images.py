@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import random
 import re
 from io import BytesIO
 from pathlib import Path
@@ -73,7 +74,12 @@ def pick_real_images(site_pages: list[dict], headline: str, out_dir: Path, *, co
     generates a substitute."""
     if count <= 0:
         return []
-    urls = collect_real_image_urls(site_pages, limit=count * 3)
+    # Shuffled (seeded by headline, so it's reproducible per article) rather
+    # than crawl order - crawl order put the same handful of images first on
+    # every page, so every article was deterministically getting the exact
+    # same cover image instead of a variety of real ones.
+    urls = collect_real_image_urls(site_pages, limit=200)
+    random.Random(headline).shuffle(urls)
     paths: list[Path] = []
     for i, url in enumerate(urls):
         path = _download_one(url, out_dir, f"{headline}-{i}")

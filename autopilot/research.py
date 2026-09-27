@@ -34,7 +34,11 @@ def fetch(url: str, timeout: int = 25) -> requests.Response | None:
         return None
 
 
-_ICONISH_RE = re.compile(r"logo|icon|favicon|sprite|avatar|badge|pixel|spacer|placeholder", re.I)
+_ICONISH_RE = re.compile(
+    r"logo|icon|favicon|sprite|avatar|badge|pixel|spacer|placeholder|mark-(white|navy|black|dark|light)|"
+    r"[/-]og[.-]|opengraph|open-graph",
+    re.I,
+)
 
 
 def _real_images(soup: BeautifulSoup, page_url: str) -> list[str]:
@@ -53,9 +57,12 @@ def _real_images(soup: BeautifulSoup, page_url: str) -> list[str]:
         seen.add(full)
         out.append(full)
 
-    og = soup.find("meta", attrs={"property": "og:image"})
-    if og and og.get("content"):
-        add(str(og["content"]))
+    # og:image deliberately NOT scraped: it's one site-wide social-preview
+    # image (often a leftover template default, as found live: a "Website
+    # Template" promo image on every single page of a real site) rather than
+    # content about anything - and since it's present identically on every
+    # crawled page, it would dominate the deterministic first-N selection
+    # below and end up as the cover of nearly every article.
     for img in soup.find_all("img"):
         src = img.get("src") or img.get("data-src") or ""
         try:

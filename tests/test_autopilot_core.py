@@ -360,7 +360,7 @@ def test_publish_does_not_loop_when_fresh_draft_is_unavailable():
     assert client.created == ["new1"]
 
 
-def test_sweep_orphan_drafts_spares_hand_written_and_kept_drafts(monkeypatch):
+def test_orphan_draft_ids_spares_hand_written_kept_and_fresh_empty_drafts():
     from autopilot import draft_cleanup
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -369,16 +369,66 @@ def test_sweep_orphan_drafts_spares_hand_written_and_kept_drafts(monkeypatch):
         ids = {t: db.add_article(project["id"], None, title=t, description="d", tags=[], markdown="m",
                                  quality={}, cover_path="", images=[]) for t in ("Orphan", "Queued")}
         db.update_article(ids["Queued"], dzen_publication_id="keep1")
-
+        now_ms = 10 * 3600 * 1000
         drafts = [
-            {"id": "o1", "title": "Orphan", "add_time": 3},
-            {"id": "keep1", "title": "Queued", "add_time": 2},
-            {"id": "q2", "title": "Queued", "add_time": 1},
-            {"id": "h1", "title": "Мой черновик вручную", "add_time": 4},
+            {"id": "o1", "title": "Orphan", "add_time": now_ms},
+            {"id": "keep1", "title": "Queued", "add_time": now_ms},
+            {"id": "q2", "title": "Queued", "add_time": now_ms},
+            {"id": "h1", "title": "Мой черновик вручную", "add_time": 0},
+            {"id": "e_old", "title": "", "add_time": 0},
+            {"id": "e_new", "title": "", "add_time": now_ms - 60_000},
+            {"id": "d1", "title": "Диагностика 3 паблиша", "add_time": now_ms},
         ]
-        seen: list[str] = []
-        monkeypatch.setattr(draft_cleanup, "list_drafts", lambda client, pid: drafts)
-        monkeypatch.setattr(draft_cleanup, "delete_drafts",
-                            lambda client, pid, ds, max_deletes=None: seen.extend(d["id"] for d in ds) or len(ds))
-        assert draft_cleanup.sweep_orphan_drafts(db, object(), "pub") == 1
-        assert seen == ["o1"]
+        assert draft_cleanup.orphan_draft_ids(db, drafts, now_ms) == ["o1", "q2", "e_old", "d1"]
+
+
+def test_pick_project_prefers_furthest_behind_quota():
+    from autopilot import publish_queue
+
+    a, b = {"slug": "a"}, {"slug": "b"}
+    picked = publish_queue.pick_project([{"project": a, "published_today": 5, "quota": 10},
+                                         {"project": b, "published_today": 1, "quota": 10}])
+    assert picked is b
+    assert publish_queue.pick_project([]) is None
+
+
+def test_publish_gate_and_pacing_roundtrip():
+    from autopilot import publish_queue
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "t.db")
+        assert publish_queue.gate_get(db) is None
+        publish_queue.gate_set(db, 7, "draft7")
+        assert publish_queue.gate_get(db)["article_id"] == 7
+        publish_queue.gate_clear(db)
+        assert publish_queue.gate_get(db) is None
+
+        assert publish_queue.publish_due(db, now=1000)
+        at = publish_queue.schedule_next_publish(db, now=1000)
+        lo, hi = publish_queue.PUBLISH_GAP_S
+        assert 1000 + lo <= at <= 1000 + hi
+        assert not publish_queue.publish_due(db, now=1000 + lo - 1)
+        assert publish_queue.publish_due(db, now=1000 + hi + 1)
+
+
+def test_publish_failures_stop_retrying_after_max_attempts():
+    from autopilot.main import _record_publish_failure
+
+    class _Tg:
+        def __init__(self):
+            self.sent = []
+
+        def safe_send(self, text):
+            self.sent.append(text)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "t.db")
+        project = db.upsert_project("p", "P", "https://p.example", "brief")
+        art_id = db.add_article(project["id"], None, title="T", description="d", tags=[], markdown="m",
+                                quality={}, cover_path="", images=[])
+        tg = _Tg()
+        _record_publish_failure(db, tg, project, {"id": art_id, "title": "T", "attempts": 0}, "boom")
+        assert db.one("SELECT status FROM articles WHERE id=?", (art_id,))["status"] == "ready"
+        _record_publish_failure(db, tg, project, {"id": art_id, "title": "T", "attempts": 2}, "boom")
+        assert db.one("SELECT status FROM articles WHERE id=?", (art_id,))["status"] == "failed"
+        assert len(tg.sent) == 1

@@ -12,12 +12,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import draft_cleanup, images, login_portal, reports
+from . import draft_cleanup, images, login_portal, publish_queue, reports
 from . import topics as topics_mod
 from . import writer
 from .config import Settings, settings as default_settings
 from .db import Database
-from .dzen_client import CaptchaRequired, DzenClient, DzenError, NoChannel, SessionExpired, publish_full_article
+from .dzen_client import CaptchaRequired, DzenClient, NoChannel, SessionExpired, publish_full_article
 from .llm import LLM, LLMError
 from .news_sources import fetch_recent_news
 from .research import run_research
@@ -29,8 +29,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("autopilot.main")
 
 TICK_SECONDS = 90
-DRAFT_SWEEP_SECONDS = 1800
-DRAFT_SWEEP_MAX = 10
+DRAFT_SWEEP_MAX_PER_TICK = 3
+DRAFT_SWEEP_IDLE_SECONDS = 1800
+REVIEW_CHECK_SECONDS = 600
 KNOWLEDGE_MAX_AGE_DAYS = 14
 STATS_REFRESH_SECONDS = 3600
 
@@ -212,14 +213,10 @@ def _prefetch_one(llm: LLM, db: Database, settings: Settings, project: dict) -> 
     return True
 
 
-# Kept equal on purpose: a shorter cooldown than the notify throttle meant
-# the retry silently opened a FRESH draft every 5 min while the human still
-# had up to 10 min "to act" per the last message they got - by the time they
-# opened the link, the draft the notification was about had already moved
-# on, so the panel looked like nothing needed confirming. One retry per
-# notification keeps what's on screen matching what was just sent.
-CAPTCHA_COOLDOWN_SECONDS = 600
-CAPTCHA_NOTIFY_EVERY_SECONDS = 600
+# Pause for any captcha that isn't a publish (e.g. during draft cleanup) -
+# publish captchas instead hold the article in awaiting_captcha until a human
+# resolves it (see publish_queue).
+CAPTCHA_COOLDOWN_SECONDS = 3600
 
 
 def _publish_one(db: Database, settings: Settings, tg: Telegram, client: DzenClient, publisher_id: str,
@@ -228,6 +225,13 @@ def _publish_one(db: Database, settings: Settings, tg: Telegram, client: DzenCli
     if not article:
         return False
     try:
+        live_url = client.published_url_by_id(publisher_id, article.get("dzen_publication_id") or "")
+        if live_url:
+            db.update_article(article["id"], status="published", dzen_url=live_url, publish_mode="publish",
+                              published_at=datetime.now(timezone.utc).isoformat(), last_error="")
+            db.add_run("publish", "ok", project_id=project["id"], article_id=article["id"],
+                       note=f"recovered (its draft is already live): {article['title'][:150]}")
+            return True
         already_live = client.find_published_by_title(publisher_id, article["title"])
         if already_live:
             db.update_article(
@@ -269,27 +273,35 @@ def _publish_one(db: Database, settings: Settings, tg: Telegram, client: DzenCli
         log.info("published project=%s article_id=%s url=%s", project["slug"], article["id"], result["url"])
         return True
     except CaptchaRequired as exc:
-        db.update_article(article["id"], status="ready", last_error=str(exc))
-        db.set_setting("dzen_cooldown_until", str(int(time.time()) + CAPTCHA_COOLDOWN_SECONDS))
-        db.add_run("publish", "failed", project_id=project["id"], article_id=article["id"], note=str(exc)[:200])
-        last_notify = int(db.get_setting("dzen_captcha_last_notify", "0") or 0)
-        if time.time() - last_notify > CAPTCHA_NOTIFY_EVERY_SECONDS:
-            db.set_setting("dzen_captcha_last_notify", str(int(time.time())))
-            tg.safe_send("⏸ Дзен запросил проверку «Я не робот» на публикации.\n" + portal.message())
+        # Hold it: the tab stays on the captcha for the human, nothing is
+        # re-submitted, and the gate blocks all browser work until Dzen says
+        # published / in review / rejected.
+        saved = db.one("SELECT dzen_publication_id FROM articles WHERE id=?", (article["id"],)) or {}
+        db.update_article(article["id"], status="awaiting_captcha", last_error=str(exc)[:500])
+        publish_queue.gate_set(db, article["id"], saved.get("dzen_publication_id") or "")
+        db.add_run("publish", "captcha", project_id=project["id"], article_id=article["id"], note=article["title"][:200])
+        tg.safe_send("⏸ Дзен просит «Я не робот». Статья ждёт тебя, повторно не отправляю, "
+                     "остальные публикации на паузе до ответа Дзена.\n"
+                     f"{project['name']}: {article['title']}\n" + portal.message())
         return False
     except (SessionExpired, NoChannel):
         db.update_article(article["id"], status="ready", last_error="dzen session expired")
         raise  # bubble up: main() re-runs login_portal.ensure_login()
-    except DzenError as exc:
+    except Exception as exc:  # noqa: BLE001 - DzenError or a raw Playwright error
         log.exception("publish failed for article #%s", article["id"])
-        db.update_article(article["id"], status="ready", last_error=str(exc)[:500])
-        db.add_run("publish", "failed", project_id=project["id"], article_id=article["id"], note=str(exc)[:200])
+        _record_publish_failure(db, tg, project, article, f"{type(exc).__name__}: {exc}")
         return False
-    except Exception as exc:  # noqa: BLE001 - e.g. a raw Playwright error, not our DzenError
-        log.exception("unexpected publish failure for article #%s", article["id"])
-        db.update_article(article["id"], status="ready", last_error=f"{type(exc).__name__}: {exc}"[:500])
-        db.add_run("publish", "failed", project_id=project["id"], article_id=article["id"], note=str(exc)[:200])
-        return False
+
+
+def _record_publish_failure(db: Database, tg: Telegram, project: dict, article: dict, error: str) -> None:
+    # claim_article returns the row as it was before its attempts+1
+    attempts = int(article.get("attempts") or 0) + 1
+    status = "failed" if attempts >= publish_queue.MAX_ATTEMPTS else "ready"
+    db.update_article(article["id"], status=status, last_error=error[:500])
+    db.add_run("publish", "failed", project_id=project["id"], article_id=article["id"], note=error[:200])
+    if status == "failed":
+        tg.safe_send(f"⚠️ {project['name']}: {attempts} неудачные попытки, статью отложил, больше не пробую\n"
+                     f"{article['title']}\n{error[:300]}")
 
 
 def _prefetch_batch(llm: LLM, db: Database, settings: Settings, projects: list[dict], now: datetime) -> None:
@@ -337,9 +349,16 @@ def run_forever(settings: Settings, db: Database, tg: Telegram, llm: LLM, publis
            else "⚠️ Tailscale не поднят — при капче придётся заходить через SSH-туннель.")
     )
     last_stats_refresh = 0.0
-    last_draft_sweep = 0.0
+    last_review_check = 0.0
+    next_sweep_at = 0.0
     try:
         with DzenClient(headed_settings) as client:
+            try:
+                publish_queue.recover_after_restart(db, client, tg, publisher_id)
+            except (SessionExpired, NoChannel):
+                raise
+            except Exception:  # noqa: BLE001
+                log.exception("restart recovery of the publish queue failed")
             while True:
                 now = datetime.now(timezone.utc)
                 cooldown = int(db.get_setting("dzen_cooldown_until", "0") or 0)
@@ -354,32 +373,60 @@ def run_forever(settings: Settings, db: Database, tg: Telegram, llm: LLM, publis
                     log.exception("prefetch batch failed")
                     db.log_event("Prefetch batch failed", kind="tick", level="error")
 
-                for project in active_projects:
-                    try:
-                        fraction = _today_window(settings, now)
-                        target = project["daily_quota"] * fraction
-                        published_today = _published_today(db, project["id"], settings, now)
+                # One browser, one queue: the gate is read before anything
+                # touches the page, and at most one article is submitted per tick.
+                try:
+                    gate_blocks = publish_queue.resolve_pending(db, client, tg, publisher_id, portal)
+                except (SessionExpired, NoChannel):
+                    raise
+                except Exception:  # noqa: BLE001
+                    log.exception("pending publication check failed")
+                    gate_blocks = publish_queue.gate_get(db) is not None
+                browser_free = not gate_blocks and not in_cooldown
 
-                        if (settings.publish_mode != "off" and not in_cooldown
-                                and published_today < target and published_today < project["daily_quota"]):
-                            if db.ready_articles(project["id"]):
-                                _publish_one(db, settings, tg, client, publisher_id, project, portal)
+                if browser_free and time.time() - last_review_check > REVIEW_CHECK_SECONDS:
+                    last_review_check = time.time()
+                    try:
+                        publish_queue.check_in_review(db, client, tg, publisher_id)
                     except (SessionExpired, NoChannel):
                         raise
                     except Exception:  # noqa: BLE001
-                        log.exception("publish tick failed for project %s", project.get("slug"))
-                        db.log_event(f"Publish tick failed for {project.get('slug')}", kind="tick", level="error")
+                        log.exception("in-review check failed")
 
-                if not in_cooldown and time.time() - last_draft_sweep > DRAFT_SWEEP_SECONDS:
-                    last_draft_sweep = time.time()
+                if browser_free and settings.publish_mode != "off" and publish_queue.publish_due(db):
+                    fraction = _today_window(settings, now)
+                    candidates = []
+                    for project in active_projects:
+                        done = _published_today(db, project["id"], settings, now)
+                        quota = project["daily_quota"]
+                        if done < quota * fraction and done < quota and db.ready_articles(project["id"]):
+                            candidates.append({"project": project, "published_today": done, "quota": quota})
+                    project = publish_queue.pick_project(candidates)
+                    if project:
+                        try:
+                            _publish_one(db, settings, tg, client, publisher_id, project, portal)
+                        except (SessionExpired, NoChannel):
+                            raise
+                        except Exception:  # noqa: BLE001
+                            log.exception("publish tick failed for project %s", project.get("slug"))
+                        finally:
+                            publish_queue.schedule_next_publish(db)
+
+                # Draft cleanup shares the same tab: only while nothing waits on
+                # a human and the next article isn't about to go.
+                next_at = float(db.get_setting(publish_queue.NEXT_PUBLISH_KEY, "0") or 0)
+                if (not in_cooldown and time.time() >= next_sweep_at and publish_queue.gate_get(db) is None
+                        and (next_at - time.time() > 120 or settings.publish_mode == "off")):
                     try:
                         swept = draft_cleanup.sweep_orphan_drafts(db, client, publisher_id,
-                                                                  max_deletes=DRAFT_SWEEP_MAX)
+                                                                  max_deletes=DRAFT_SWEEP_MAX_PER_TICK)
                         if swept:
                             log.info("draft sweep: deleted %s orphaned drafts", swept)
+                        else:
+                            next_sweep_at = time.time() + DRAFT_SWEEP_IDLE_SECONDS
                     except CaptchaRequired:
                         db.set_setting("dzen_cooldown_until", str(int(time.time()) + CAPTCHA_COOLDOWN_SECONDS))
-                        log.warning("draft sweep hit a captcha - pausing Dzen actions")
+                        tg.safe_send("⏸ Дзен показал капчу во время чистки черновиков — всё на паузе на час.")
                     except Exception:  # noqa: BLE001
                         log.exception("draft sweep failed")
 

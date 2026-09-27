@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import random
 import re
 import secrets
 import time
@@ -399,6 +400,22 @@ class DzenClient:
                 return {"publication_id": str(pub.get("publicationId", "")), "url": f"{BASE}{pub.get('commonUrl', '')}"}
         return None
 
+    def published_url_by_id(self, publisher_id: str, publication_id: str) -> str | None:
+        """Live URL of a publication if that exact id is published (and not
+        deleted), else None. Read-only."""
+        if not publication_id:
+            return None
+        data = self.api(
+            "GET",
+            f"/editor-api/v2/publisher/{publisher_id}/stats2?publisherId={publisher_id}&allPublications=true"
+            f"&fields=views&groupBy=flight&sortBy=addTime&sortOrderDesc=true&pageSize=100&page=0",
+        )
+        for item in data.get("publications", []) or []:
+            pub = item.get("publication", {}) if isinstance(item, dict) else {}
+            if str(pub.get("publicationId", "")) == publication_id and not pub.get("deleted"):
+                return f"{BASE}{pub.get('commonUrl', '')}"
+        return None
+
     def channel_stats(self, publisher_id: str) -> dict[str, Any]:
         fields = "&".join(f"fields={f}" for f in ("views", "likes", "comments", "shares", "subscribers",
                                                    "subscribersDiff", "impressions"))
@@ -460,14 +477,22 @@ class DzenClient:
         except Exception:  # noqa: BLE001
             pass
 
+    def _pause(self, lo: float, hi: float) -> None:
+        """Unhurried, uneven gap between editor steps - the editor was being
+        filled and submitted in a single burst, which Dzen reads as a bot."""
+        self._page.wait_for_timeout(int(random.uniform(lo, hi) * 1000))
+
     def _paste_html(self, element: Any, html: str, plain: str) -> None:
         element.click(force=True, timeout=10000)
+        self._pause(0.6, 1.2)
         # A reused draft still holds the previous attempt's text and inline
         # images. Select-all + delete twice: Draft.js sometimes keeps a
         # trailing atomic (image) block after the first pass.
         for _ in range(2):
             self._page.keyboard.press("Control+a")
+            self._pause(0.3, 0.6)
             self._page.keyboard.press("Backspace")
+            self._pause(0.3, 0.6)
         self._page.evaluate(
             """async ({html, text}) => {
                 const item = new ClipboardItem({
@@ -479,7 +504,7 @@ class DzenClient:
             {"html": html, "text": plain},
         )
         self._page.keyboard.press("Control+v")
-        self._page.wait_for_timeout(800)
+        self._pause(1.5, 3.0)
 
     def _find_add_media_icon(self) -> Any:
         """The add-media affordance is a distinctive 28x28 icon that tracks the
@@ -550,28 +575,33 @@ class DzenClient:
         self._ctx.grant_permissions(["clipboard-read", "clipboard-write"])
         edit_url = f"{EDITOR}/id/{publisher_id}/{publication_id}/edit"
         self._page.goto(edit_url, wait_until="networkidle", timeout=45000)
-        self._page.wait_for_timeout(2000)
+        self._pause(2.5, 4.5)
         self._dismiss_help_overlay()
+        self._pause(1.0, 2.0)
 
         editables = self._page.query_selector_all("[contenteditable='true']")
         if len(editables) < 2:
             raise DraftUnavailable("editor page did not render the expected title/body fields")
         self._paste_html(editables[0], f"<p>{title}</p>", title)
+        self._pause(2.0, 4.0)
         self._paste_html(editables[1], html_body, plain_body)
-        self._page.wait_for_timeout(1000)
+        self._pause(3.0, 6.0)
 
         for path in image_paths:
-            if Path(path).is_file() and not self._insert_image_via_ui(Path(path)):
+            if not Path(path).is_file():
+                continue
+            self._pause(2.0, 4.0)
+            if not self._insert_image_via_ui(Path(path)):
                 log.warning("could not insert image via UI: %s", path)
 
-        self._page.wait_for_timeout(1500)  # let the trailing autosave land
+        self._pause(3.0, 6.0)  # let the trailing autosave land
 
         if mode != "publish":
             return edit_url
 
         self._page.keyboard.press("Escape")  # dismiss any stray leftover overlay before the publish click
         self._page.get_by_role("button", name="Опубликовать").first.click(force=True, timeout=10000)
-        self._page.wait_for_timeout(1500)
+        self._pause(2.5, 4.5)
         # First click opens a "Публикация" settings side panel with its OWN
         # "Опубликовать" button paired next to "Опубликовать позже". DOM order
         # doesn't match visual order (portal-rendered panel), so `.last` was
@@ -592,6 +622,7 @@ class DzenClient:
                     except Exception:  # noqa: BLE001
                         continue
                 if panel_confirm_locator is not None:
+                    self._pause(1.5, 3.0)
                     panel_confirm_locator.click(force=True, timeout=8000)
                     clicked_panel_button = True
         except Exception:  # noqa: BLE001
@@ -603,7 +634,7 @@ class DzenClient:
                     again.click(force=True, timeout=8000)
             except Exception:  # noqa: BLE001
                 pass
-        self._page.wait_for_timeout(2500)
+        self._pause(3.0, 5.0)
         # The confirm click can land the published article in a NEW tab
         # rather than navigating the original edit tab - scan every open page.
         final_url = next((p.url for p in self._ctx.pages if "/a/" in p.url), self._page.url)

@@ -417,6 +417,11 @@ def run_forever(settings: Settings, db: Database, tg: Telegram, llm: LLM, publis
                             log.exception("publish tick failed for project %s", project.get("slug"))
                         finally:
                             publish_queue.schedule_next_publish(db)
+                    else:
+                        # Nothing may go right now (window closed / quotas met).
+                        # Leaving the due time in the past starved the draft
+                        # sweep, which waits for a gap before the next publish.
+                        db.set_setting(publish_queue.NEXT_PUBLISH_KEY, str(int(time.time()) + 300))
 
                 # Draft cleanup shares the same tab: only while nothing waits on
                 # a human and the next article isn't about to go.

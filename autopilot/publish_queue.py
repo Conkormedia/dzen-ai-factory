@@ -131,17 +131,20 @@ def resolve_pending(db: Database, client: DzenClient, tg: Any, publisher_id: str
                    note=f"after captcha: {title[:150]}")
         gate_clear(db)
         _close_extra_tabs(client)
+        log.info("captcha resolved: article #%s published %s", article["id"], detail)
         tg.safe_send(f"🟢 Опубликовано после проверки\n{title}\n{detail}")
         return False
     if state == "rejected":
         db.update_article(article["id"], status="rejected", last_error=f"dzen: {detail}"[:500])
         gate_clear(db)
+        log.info("captcha resolved: article #%s rejected (%s)", article["id"], detail)
         tg.safe_send(f"⛔ Дзен отклонил публикацию: {detail}\n{title}")
         return False
     if state == "in_review":
         db.update_article(article["id"], status="in_review", last_error="")
         gate_clear(db)
         _close_extra_tabs(client)
+        log.info("captcha resolved: article #%s went to review", article["id"])
         tg.safe_send(f"🕓 Статья ушла на проверку Дзена, жду результата\n{title}")
         return False
     if time.time() - int(gate.get("reminded_at") or 0) > CAPTCHA_REMINDER_S:

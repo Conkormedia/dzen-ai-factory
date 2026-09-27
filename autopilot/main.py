@@ -279,6 +279,8 @@ def _publish_one(db: Database, settings: Settings, tg: Telegram, client: DzenCli
         saved = db.one("SELECT dzen_publication_id FROM articles WHERE id=?", (article["id"],)) or {}
         db.update_article(article["id"], status="awaiting_captcha", last_error=str(exc)[:500])
         publish_queue.gate_set(db, article["id"], saved.get("dzen_publication_id") or "")
+        log.warning("article #%s awaiting captcha (draft %s) - publishing paused until it resolves",
+                    article["id"], saved.get("dzen_publication_id") or "?")
         db.add_run("publish", "captcha", project_id=project["id"], article_id=article["id"], note=article["title"][:200])
         tg.safe_send("⏸ Дзен просит «Я не робот». Статья ждёт тебя, повторно не отправляю, "
                      "остальные публикации на паузе до ответа Дзена.\n"
@@ -361,6 +363,10 @@ def run_forever(settings: Settings, db: Database, tg: Telegram, llm: LLM, publis
                 log.exception("restart recovery of the publish queue failed")
             while True:
                 now = datetime.now(timezone.utc)
+                try:
+                    portal.ensure_alive()
+                except Exception:  # noqa: BLE001
+                    log.exception("VNC portal check failed")
                 cooldown = int(db.get_setting("dzen_cooldown_until", "0") or 0)
                 in_cooldown = cooldown > time.time()
                 active_projects = db.projects(only_active=True)

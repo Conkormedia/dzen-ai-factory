@@ -432,3 +432,33 @@ def test_publish_failures_stop_retrying_after_max_attempts():
         _record_publish_failure(db, tg, project, {"id": art_id, "title": "T", "attempts": 2}, "boom")
         assert db.one("SELECT status FROM articles WHERE id=?", (art_id,))["status"] == "failed"
         assert len(tg.sent) == 1
+
+
+def test_vnc_portal_respawns_dead_x11vnc_with_same_password(monkeypatch):
+    from autopilot import vnc_portal
+    from autopilot.config import Settings
+
+    started: list[list[str]] = []
+
+    class _FakeProc:
+        def __init__(self, args, **kwargs):
+            started.append(args)
+            self._alive = True
+
+        def alive(self):
+            return self._alive
+
+    monkeypatch.setattr(vnc_portal, "_Proc", _FakeProc)
+    monkeypatch.setattr(vnc_portal, "tailscale_ip", lambda: "100.1.2.3")
+    monkeypatch.setattr(vnc_portal.time, "sleep", lambda s: None)
+    portal = vnc_portal.VncPortal(Settings())
+    portal.start()
+    assert portal.ensure_alive() == []
+
+    portal._vnc._alive = False
+    started.clear()
+    assert portal.ensure_alive() == ["x11vnc"]
+    assert started and started[0][0] == "x11vnc" and portal.password in started[0]
+
+    portal._xvfb._alive = False
+    assert portal.ensure_alive() == ["xvfb"]

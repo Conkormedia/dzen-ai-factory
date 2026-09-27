@@ -400,7 +400,10 @@ def run_forever(settings: Settings, db: Database, tg: Telegram, llm: LLM, publis
                         log.exception("in-review check failed")
 
                 if browser_free and settings.publish_mode != "off" and publish_queue.publish_due(db):
-                    fraction = _today_window(settings, now)
+                    # "publish now" override (settings key, a unix time): ignores the
+                    # daily window, but quotas, gaps and the captcha gate still apply
+                    override = time.time() < float(db.get_setting("dzen_publish_now_until", "0") or 0)
+                    fraction = 1.0 if override else _today_window(settings, now)
                     candidates = []
                     for project in active_projects:
                         done = _published_today(db, project["id"], settings, now)

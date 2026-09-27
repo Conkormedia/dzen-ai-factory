@@ -373,6 +373,25 @@ class DzenClient:
                     }
         return out
 
+    def find_published_by_title(self, publisher_id: str, title: str) -> dict[str, str] | None:
+        """Crash-safety check: is this EXACT title already live on the
+        channel? A process crash (e.g. the Playwright/Node driver's EPIPE)
+        between a real successful Dzen-side publish and the DB write that
+        records it leaves an article stuck in status='publishing' with no
+        local record the publish already happened - left unchecked, it gets
+        released and retried, creating a genuine live duplicate. Only the
+        most recent page is checked: a stuck article would be recent."""
+        data = self.api(
+            "GET",
+            f"/editor-api/v2/publisher/{publisher_id}/stats2?publisherId={publisher_id}&allPublications=true"
+            f"&fields=views&groupBy=flight&sortBy=addTime&sortOrderDesc=true&pageSize=100&page=0",
+        )
+        for item in data.get("publications", []) or []:
+            pub = item.get("publication", {}) if isinstance(item, dict) else {}
+            if pub.get("title") == title and not pub.get("deleted"):
+                return {"publication_id": str(pub.get("publicationId", "")), "url": f"{BASE}{pub.get('commonUrl', '')}"}
+        return None
+
     def channel_stats(self, publisher_id: str) -> dict[str, Any]:
         fields = "&".join(f"fields={f}" for f in ("views", "likes", "comments", "shares", "subscribers",
                                                    "subscribersDiff", "impressions"))

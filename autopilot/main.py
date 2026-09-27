@@ -210,7 +210,13 @@ def _prefetch_one(llm: LLM, db: Database, settings: Settings, project: dict) -> 
     return True
 
 
-CAPTCHA_COOLDOWN_SECONDS = 300
+# Kept equal on purpose: a shorter cooldown than the notify throttle meant
+# the retry silently opened a FRESH draft every 5 min while the human still
+# had up to 10 min "to act" per the last message they got - by the time they
+# opened the link, the draft the notification was about had already moved
+# on, so the panel looked like nothing needed confirming. One retry per
+# notification keeps what's on screen matching what was just sent.
+CAPTCHA_COOLDOWN_SECONDS = 600
 CAPTCHA_NOTIFY_EVERY_SECONDS = 600
 
 
@@ -220,6 +226,20 @@ def _publish_one(db: Database, settings: Settings, tg: Telegram, client: DzenCli
     if not article:
         return False
     try:
+        already_live = client.find_published_by_title(publisher_id, article["title"])
+        if already_live:
+            db.update_article(
+                article["id"], status="published", dzen_publication_id=already_live["publication_id"],
+                dzen_url=already_live["url"], publish_mode="publish",
+                published_at=datetime.now(timezone.utc).isoformat(),
+            )
+            db.add_run("publish", "ok", project_id=project["id"], article_id=article["id"],
+                       note=f"recovered (already live, crash-safety check): {article['title'][:150]}")
+            log.info("article #%s already live on Dzen, recovered instead of re-publishing: %s",
+                     article["id"], already_live["url"])
+            tg.safe_send(f"♻️ {project['name']}: уже было опубликовано раньше (защита от дублей)\n"
+                        f"{article['title']}\n{already_live['url']}")
+            return True
         tags = json.loads(article.get("tags_json") or "[]")
         images_meta = json.loads(article.get("images_json") or "[]")
         inline_paths = [Path(x["path"]) for x in images_meta if x.get("path")]

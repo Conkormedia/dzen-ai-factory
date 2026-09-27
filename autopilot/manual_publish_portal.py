@@ -95,11 +95,12 @@ def run() -> None:
 
         os.environ["DISPLAY"] = settings.login_display
         with DzenClient(headed_settings) as client:
-            publication_id = article.get("dzen_publication_id") or client.create_draft(publisher_id)
             result = publish_full_article(
-                client, publisher_id, publication_id, title=article["title"], markdown=article["markdown"],
+                client, publisher_id, title=article["title"], markdown=article["markdown"],
                 description=article["description"], tags=tags, cover_path=cover,
                 inline_image_paths=inline_paths, mode="draft",
+                draft_id=article.get("dzen_publication_id") or "",
+                on_draft_created=lambda pid: db.update_article(article["id"], dzen_publication_id=pid),
             )
             print(f"[manual] draft ready, publication_id={result['publication_id']}, content+images pasted")
 

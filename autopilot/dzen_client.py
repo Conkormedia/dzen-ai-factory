@@ -20,7 +20,7 @@ import re
 import secrets
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .config import Settings
 from .draftjs import markdown_to_html
@@ -45,6 +45,13 @@ class CaptchaRequired(DzenError):
 
 
 class NoChannel(DzenError):
+    pass
+
+
+class DraftUnavailable(DzenError):
+    """The editor didn't render the draft - usually it was deleted or
+    published by hand since the last attempt. Callers reusing a stored draft
+    id treat this as "start a fresh draft", everyone else as a plain failure."""
     pass
 
 
@@ -455,7 +462,12 @@ class DzenClient:
 
     def _paste_html(self, element: Any, html: str, plain: str) -> None:
         element.click(force=True, timeout=10000)
-        self._page.keyboard.press("Control+a")
+        # A reused draft still holds the previous attempt's text and inline
+        # images. Select-all + delete twice: Draft.js sometimes keeps a
+        # trailing atomic (image) block after the first pass.
+        for _ in range(2):
+            self._page.keyboard.press("Control+a")
+            self._page.keyboard.press("Backspace")
         self._page.evaluate(
             """async ({html, text}) => {
                 const item = new ClipboardItem({
@@ -543,7 +555,7 @@ class DzenClient:
 
         editables = self._page.query_selector_all("[contenteditable='true']")
         if len(editables) < 2:
-            raise DzenError("editor page did not render the expected title/body fields")
+            raise DraftUnavailable("editor page did not render the expected title/body fields")
         self._paste_html(editables[0], f"<p>{title}</p>", title)
         self._paste_html(editables[1], html_body, plain_body)
         self._page.wait_for_timeout(1000)
@@ -618,28 +630,52 @@ class DzenClient:
         return final_url
 
 
-def publish_full_article(client: "DzenClient", publisher_id: str, publication_id: str, *, title: str,
-                         markdown: str, description: str, tags: list[str], cover_path: Path | None,
-                         inline_image_paths: list[Path], mode: str = "publish") -> dict[str, Any]:
-    """Drives the real editor UI for an ALREADY-CREATED draft: content +
-    images + the publish click itself (fp IS needed there — see
-    publish_via_ui). Returns {"publication_id", "url", "mode"}.
-    Raises SessionExpired/CaptchaRequired/NoChannel/DzenError — callers decide
+def publish_full_article(client: "DzenClient", publisher_id: str, *, title: str, markdown: str,
+                         description: str, tags: list[str], cover_path: Path | None,
+                         inline_image_paths: list[Path], mode: str = "publish",
+                         draft_id: str = "",
+                         on_draft_created: Callable[[str], None] | None = None) -> dict[str, Any]:
+    """Creates a draft via the API (no fp needed there), then drives the real
+    editor UI for content + images + the publish click itself (fp IS needed
+    there - see publish_via_ui). Returns {"publication_id", "url", "mode"}.
+    Raises SessionExpired/CaptchaRequired/NoChannel/DzenError - callers decide
     how to react (retry, pause, alert).
 
-    The caller creates (or reuses) publication_id and persists it BEFORE
-    calling this - a live incident showed every retry calling create_draft
-    fresh left behind an orphaned draft each time (hundreds accumulated
-    across one captcha-blocked night), since this UI step is exactly the
-    one that can fail/crash.
+    One article = one draft across every attempt. Pass the id saved from an
+    earlier failed attempt as `draft_id` and it is reused (its old content is
+    replaced). `on_draft_created` is called the moment a NEW draft exists, so
+    the caller can persist the id before anything else can fail - otherwise a
+    captcha or a missed click abandons the draft and the next retry opens
+    another one (that's how hundreds of copies piled up in the channel).
     """
     images = [p for p in ([cover_path] if cover_path else []) + list(inline_image_paths) if p and Path(p).is_file()]
     html_body = markdown_to_html(markdown)
     plain_body = re.sub(r"<[^>]+>", " ", html_body)
 
-    url = client.publish_via_ui(
-        publisher_id, publication_id, title=title, html_body=html_body, plain_body=plain_body,
-        image_paths=images, mode=mode,
-    )
+    def fresh_draft() -> str:
+        new_id = client.create_draft(publisher_id)
+        log.info("Dzen draft created id=%s title=%r", new_id, title)
+        if on_draft_created:
+            on_draft_created(new_id)
+        return new_id
+
+    def attempt(pid: str) -> str:
+        return client.publish_via_ui(
+            publisher_id, pid, title=title, html_body=html_body, plain_body=plain_body,
+            image_paths=images, mode=mode,
+        )
+
+    publication_id = draft_id or fresh_draft()
+    if draft_id:
+        log.info("Dzen draft reused id=%s title=%r", publication_id, title)
+    try:
+        url = attempt(publication_id)
+    except DraftUnavailable:
+        if not draft_id:
+            raise
+        # the saved draft is gone (deleted or published by hand) - one fresh one, once
+        log.warning("saved Dzen draft id=%s no longer opens, starting a fresh one", publication_id)
+        publication_id = fresh_draft()
+        url = attempt(publication_id)
     log.info("Dzen publish ok id=%s mode=%s url=%s", publication_id, mode, url)
     return {"publication_id": publication_id, "url": url, "mode": mode}

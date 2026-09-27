@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from autopilot.db import Database
 from autopilot.draftjs import build_content_state, markdown_to_html, snippet, utf16_len
+from autopilot.dzen_client import DraftUnavailable, publish_full_article
 from autopilot.images import collect_real_image_urls
 from autopilot.llm import LLMError, extract_json
 from autopilot.quality import allowed_domains, check_article, find_third_party_brands, plain_text, sanitize_markdown
@@ -303,3 +304,57 @@ def test_db_round_trip_project_topic_article():
                           published_at="2026-09-25T10:00:00+00:00")
         assert db.published_links(project["id"])[0]["dzen_url"] == "https://dzen.ru/a/1"
         assert db.count_topics(project["id"]) == 1
+
+
+class _FakeDzen:
+    """Records draft creation; publish_via_ui fails for ids in `gone`."""
+
+    def __init__(self, gone: set[str] | None = None):
+        self.created: list[str] = []
+        self.gone = gone or set()
+
+    def create_draft(self, publisher_id):
+        new_id = f"new{len(self.created) + 1}"
+        self.created.append(new_id)
+        return new_id
+
+    def publish_via_ui(self, publisher_id, publication_id, **kwargs):
+        if publication_id in self.gone:
+            raise DraftUnavailable("gone")
+        return f"https://dzen.ru/a/{publication_id}"
+
+
+def _publish(client, **kw):
+    persisted: list[str] = []
+    result = publish_full_article(client, "pub", title="T", markdown="## x\n\ntext", description="d", tags=[],
+                                  cover_path=None, inline_image_paths=[], on_draft_created=persisted.append, **kw)
+    return result, persisted
+
+
+def test_publish_reuses_saved_draft_instead_of_creating_one():
+    # Regression: every retry used to call create_draft fresh, leaving hundreds of orphaned drafts.
+    client = _FakeDzen()
+    result, persisted = _publish(client, draft_id="saved1")
+    assert result["publication_id"] == "saved1"
+    assert client.created == [] and persisted == []
+
+
+def test_publish_creates_and_persists_draft_when_none_saved():
+    client = _FakeDzen()
+    result, persisted = _publish(client)
+    assert client.created == ["new1"] and persisted == ["new1"]
+    assert result["publication_id"] == "new1"
+
+
+def test_publish_falls_back_once_when_saved_draft_was_deleted():
+    client = _FakeDzen(gone={"saved1"})
+    result, persisted = _publish(client, draft_id="saved1")
+    assert result["publication_id"] == "new1"
+    assert client.created == ["new1"] and persisted == ["new1"]
+
+
+def test_publish_does_not_loop_when_fresh_draft_is_unavailable():
+    client = _FakeDzen(gone={"new1"})
+    with pytest.raises(DraftUnavailable):
+        _publish(client)
+    assert client.created == ["new1"]

@@ -245,21 +245,17 @@ def _publish_one(db: Database, settings: Settings, tg: Telegram, client: DzenCli
         inline_paths = [Path(x["path"]) for x in images_meta if x.get("path")]
         cover = Path(article["cover_path"]) if article.get("cover_path") else None
 
-        publication_id = article.get("dzen_publication_id") or ""
-        if publication_id:
-            log.info("reusing existing draft id=%s for article #%s (retry)", publication_id, article["id"])
-        else:
-            publication_id = client.create_draft(publisher_id)
-            # Persisted immediately, before the risky UI step - if that step
-            # fails or the process crashes, the next retry reuses this exact
-            # draft instead of leaving it orphaned and creating a new one.
-            db.update_article(article["id"], dzen_publication_id=publication_id)
-            log.info("Dzen draft created id=%s title=%r", publication_id, article["title"])
+        def _persist_draft_id(pid: str, _article_id: int = article["id"]) -> None:
+            # Fires the moment a NEW draft exists, before the risky UI step -
+            # if that step fails or the process crashes, the next retry reuses
+            # this exact draft instead of leaving it orphaned.
+            db.update_article(_article_id, dzen_publication_id=pid)
 
         result = publish_full_article(
-            client, publisher_id, publication_id, title=article["title"], markdown=article["markdown"],
+            client, publisher_id, title=article["title"], markdown=article["markdown"],
             description=article["description"], tags=tags, cover_path=cover,
             inline_image_paths=inline_paths, mode=settings.publish_mode,
+            draft_id=article.get("dzen_publication_id") or "", on_draft_created=_persist_draft_id,
         )
         db.update_article(
             article["id"], status="published" if result["mode"] == "publish" else "draft_saved",

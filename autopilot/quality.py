@@ -259,7 +259,8 @@ def check_article(*, title: str, description: str, tags: list[str], markdown: st
         problems.append("Упомянуты чужие сервисы: " + ", ".join(found))
 
     # --- any other third-party brand/product/person -------------------------
-    brands = find_third_party_brands(markdown, project.get("name", ""), extra_allowed=competitors)
+    brands = find_third_party_brands(markdown, project.get("name", ""),
+                                     extra_allowed=competitors + list(knowledge.get("platforms") or []))
     if brands:
         problems.append("Упомянуты сторонние бренды/имена (запрещено): " + ", ".join(brands[:8]))
 

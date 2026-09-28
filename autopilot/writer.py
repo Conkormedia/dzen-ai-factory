@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 
 from .llm import LLM, LLMError
-from .positioning import owner_directives
+from .positioning import owner_directives, platforms_of
 from .quality import check_article, sanitize_markdown
 
 log = logging.getLogger(__name__)
@@ -15,7 +15,8 @@ SYSTEM_PROMPT = """Ты — опытный редактор-копирайтер
 
 ЖЁСТКИЕ ПРАВИЛА (нарушение любого из первых двух — статья бракуется целиком, без исключений):
 1. АБСОЛЮТНЫЙ ЗАПРЕТ на упоминание ЛЮБЫХ сторонних компаний, брендов, продуктов, приложений, платформ
-   или реальных людей (артистов, публичных персон) — кроме продвигаемого сервиса. Это касается ВООБЩЕ
+   или реальных людей (артистов, публичных персон) — кроме продвигаемого сервиса и платформ, прямо
+   перечисленных в брифе в строке «Разрешённые платформы» (это каналы самого сервиса). Это касается ВООБЩЕ
    ЛЮБОГО контекста: примера, сравнения, новостного повода, цитаты, "как сообщает...", шутки, аналогии.
    Ты никогда не пишешь названия конкретных компаний (даже крупных и всем известных), названия чужих
    продуктов, имена артистов/публичных персон, названия других СМИ/изданий. Если тема подразумевает
@@ -122,12 +123,16 @@ def write_article(llm: LLM, project: dict, topic: dict, knowledge: dict, *,
 
 
 def _repair(llm: LLM, project: dict, data: dict, problems: list[str], min_chars: int, max_chars: int) -> dict:
+    platforms = platforms_of(project)
+    keep_platforms = (f"\n\nРазрешённые платформы (каналы самого сервиса, не удаляй их): {', '.join(platforms)}"
+                      if platforms else "")
     prompt = (
         f"Вот черновик статьи для {project['name']} в формате JSON:\n"
         f"{{\"title\": {data['title']!r}, \"description\": {data['description']!r}, "
         f"\"tags\": {data['tags']!r}, \"markdown\": {data['markdown']!r}}}\n\n"
         f"Редактор нашёл проблемы, исправь ВСЕ, не потеряв объём (мин. {min_chars}, макс. {max_chars} знаков):\n"
         + "\n".join(f"- {p}" for p in problems)
+        + keep_platforms
         + "\n\nВерни исправленный JSON той же структуры (title/description/tags/markdown), только JSON."
     )
     fixed = llm.json(SYSTEM_PROMPT, prompt, purpose="repair_article", max_tokens=16000)

@@ -46,7 +46,15 @@ def apply_owner(knowledge: dict[str, Any], project: dict[str, Any]) -> dict[str,
     for key in ("summary", "tone"):
         if owner.get(key):
             merged[key] = owner[key]
+    merged["platforms"] = platforms_of(project)
     return merged
+
+
+def platforms_of(project: dict[str, Any]) -> list[str]:
+    """Third-party platforms the product itself runs on (BizGateWay's own
+    channels are WhatsApp and Telegram) - the one exception to the ban on
+    naming anyone else, since an article can't explain the product without them."""
+    return [str(x).strip() for x in owner_of(project).get("platforms") or [] if str(x).strip()]
 
 
 def owner_directives(project: dict[str, Any]) -> str:
@@ -54,11 +62,15 @@ def owner_directives(project: dict[str, Any]) -> str:
     owner = owner_of(project)
     focus = str(owner.get("focus") or "").strip()
     avoid = [str(x).strip() for x in owner.get("avoid") or [] if str(x).strip()]
-    if not focus and not avoid:
+    platforms = platforms_of(project)
+    if not focus and not avoid and not platforms:
         return ""
     out = "ПОЗИЦИОНИРОВАНИЕ ОТ ВЛАДЕЛЬЦА (главный приоритет, важнее всего остального в этом брифе):\n"
     if focus:
         out += f"{focus}\n"
+    if platforms:
+        out += (f"Разрешённые платформы: {', '.join(platforms)} — это каналы самого сервиса, называй их прямо "
+                "по имени (в заголовке тоже, если тема про них); любые другие сторонние названия по-прежнему запрещены.\n")
     if avoid:
         out += "Так НЕЛЬЗЯ:\n" + "\n".join(f"- {x}" for x in avoid) + "\n"
     return out

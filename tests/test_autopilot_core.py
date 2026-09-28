@@ -348,11 +348,23 @@ def test_owner_directives_reach_topic_and_article_prompts():
         assert "- подавать OTP как защиту аккаунтов" in text
 
 
+def test_allowed_platforms_are_named_in_prompts_and_pass_the_brand_gate():
+    project = {**PROJECT, "owner_json": json.dumps({"platforms": ["Zoomer"]})}
+    knowledge = apply_owner({}, project)
+    assert knowledge["platforms"] == ["Zoomer"]
+    assert "Разрешённые платформы: Zoomer" in owner_directives(project)
+    md = sanitize_markdown(_article_markdown().replace("Опыт клиентов", "Опыт клиентов в Zoomer"), PROJECT)
+    kwargs = dict(title="Как быстро отвечать клиентам в WhatsApp", description="Описание статьи " * 5,
+                  tags=["a", "b", "c"], markdown=md, project=PROJECT, min_chars=1500, max_chars=9000)
+    assert any("Zoomer" in p for p in check_article(knowledge={}, **kwargs).problems)
+    assert not any("Zoomer" in p for p in check_article(knowledge=knowledge, **kwargs).problems)
+
+
 def test_seed_owner_blocks_are_valid_and_brand_free():
     seed = json.loads((Path(__file__).resolve().parents[1] / "autopilot" / "projects.seed.json").read_text("utf-8"))
     for item in seed:
         owner = item.get("owner") or {}
-        assert set(owner) <= {"summary", "tone", "focus", "avoid", "replace", "drop_patterns", *LIST_KEYS}
+        assert set(owner) <= {"summary", "tone", "focus", "avoid", "replace", "drop_patterns", "platforms", *LIST_KEYS}
         for pattern in owner.get("drop_patterns") or []:
             re.compile(pattern)
         text = json.dumps(owner, ensure_ascii=False) + " " + item.get("brief", "")

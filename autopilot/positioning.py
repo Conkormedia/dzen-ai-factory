@@ -26,10 +26,28 @@ def owner_of(project: dict[str, Any]) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _as_text(item: Any) -> str:
+    """The dossier LLM sometimes returns {"objection": ..., "answer": ...}
+    objects where the prompts expect plain strings - flatten them."""
+    if isinstance(item, dict):
+        return " — ".join(_as_text(v) for v in item.values() if v)
+    if isinstance(item, (list, tuple)):
+        return "; ".join(_as_text(v) for v in item if v)
+    return str(item).strip()
+
+
 def apply_owner(knowledge: dict[str, Any], project: dict[str, Any]) -> dict[str, Any]:
     """Owner lists go first (or replace the dossier's list for keys named in
     "replace"); dossier items matching "drop_patterns" are removed so a
-    site-derived claim can't contradict the owner (e.g. founding year)."""
+    site-derived claim can't contradict the owner (e.g. founding year).
+    Every list comes out as plain strings, owner block or not."""
+    knowledge = dict(knowledge)
+    for key in LIST_KEYS:
+        value = knowledge.get(key)
+        if isinstance(value, (str, dict)):
+            value = [value]
+        if isinstance(value, list):
+            knowledge[key] = [text for text in map(_as_text, value) if text]
     owner = owner_of(project)
     if not owner:
         return knowledge

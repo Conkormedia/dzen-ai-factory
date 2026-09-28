@@ -323,6 +323,19 @@ def test_apply_owner_puts_owner_first_replaces_and_drops_contradictions():
     assert knowledge["facts"][0].endswith("2019 года")  # the stored dossier itself is untouched
 
 
+def test_apply_owner_flattens_dossier_objects_so_topic_prompts_build():
+    # live crash: re-researched dossier returned objections as objects and
+    # the topic prompt's '; '.join() blew up on every tick
+    knowledge = {"objections": [{"objection": "дорого", "answer": "платите за результат"}, "долго"],
+                 "facts": "одна строка", "pains": [["а", "б"]]}
+    merged = apply_owner(knowledge, {"slug": "p"})
+    assert merged["objections"] == ["дорого — платите за результат", "долго"]
+    assert merged["facts"] == ["одна строка"]
+    assert merged["pains"] == ["а; б"]
+    generate_topics(_StubLLM([]), {"name": "P", "url": "https://p.example"}, merged, [], [], count=3)
+    _topic_brief({"name": "P", "url": "https://p.example"}, {"title": "Тема"}, merged)
+
+
 def test_apply_owner_is_a_no_op_without_valid_owner_block():
     knowledge = {"facts": ["a"]}
     assert apply_owner(knowledge, {"slug": "p"}) == knowledge

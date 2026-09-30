@@ -26,7 +26,7 @@ from typing import Any
 
 from . import draft_cleanup
 from .db import Database
-from .dzen_client import DzenClient
+from .dzen_client import DzenClient, is_article_url
 
 log = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ def publication_state(client: DzenClient, publisher_id: str, draft_id: str) -> t
     """Where a submitted draft stands on Dzen: ("published", url),
     ("rejected", reason), ("draft", "") or ("in_review", "")."""
     for page in list(client._ctx.pages):  # noqa: SLF001 - the human may have published from this tab
-        if "/a/" in (page.url or "") and draft_id:
+        if draft_id and is_article_url(page.url, draft_id):
             url = client.published_url_by_id(publisher_id, draft_id)
             if url:
                 return "published", url

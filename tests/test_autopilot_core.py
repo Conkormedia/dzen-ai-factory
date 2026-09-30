@@ -573,3 +573,14 @@ def test_vnc_portal_respawns_dead_x11vnc_with_same_password(monkeypatch):
 
     portal._xvfb._alive = False
     assert portal.ensure_alive() == ["xvfb"]
+
+
+def test_is_article_url_accepts_both_published_forms_but_not_the_editor():
+    from autopilot.dzen_client import is_article_url
+    pid = "6abd6f06d317365e097fc463"
+    assert is_article_url("https://dzen.ru/a/armrk3GFCAukCkmW")
+    assert is_article_url(f"https://dzen.ru/media/conkormedia/{pid}", pid)
+    assert not is_article_url(f"https://dzen.ru/media/conkormedia/{pid}", "")
+    assert not is_article_url(f"https://dzen.ru/media/conkormedia/other", pid)
+    assert not is_article_url(f"https://dzen.ru/profile/editor/id/66cef6ad33c5f3248520f81f/{pid}/edit", pid)
+    assert not is_article_url("")

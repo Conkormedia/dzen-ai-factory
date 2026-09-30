@@ -17,7 +17,8 @@ from . import topics as topics_mod
 from . import writer
 from .config import Settings, settings as default_settings
 from .db import Database
-from .dzen_client import CaptchaRequired, DzenClient, NoChannel, SessionExpired, publish_full_article
+from .dzen_client import (AlreadyPublished, CaptchaRequired, DzenClient, NoChannel, SessionExpired,
+                          publish_full_article)
 from .llm import LLM, LLMError
 from .news_sources import fetch_recent_news
 from .research import run_research
@@ -293,6 +294,11 @@ def _publish_one(db: Database, settings: Settings, tg: Telegram, client: DzenCli
         tg.safe_send("⏸ Дзен просит «Я не робот». Статья ждёт тебя, повторно не отправляю, "
                      "остальные публикации на паузе до ответа Дзена.\n"
                      f"{project['name']}: {article['title']}\n" + portal.message())
+        return False
+    except AlreadyPublished as exc:
+        # check_in_review records the URL once Dzen lists it among publications
+        db.update_article(article["id"], status="in_review", last_error=str(exc)[:500])
+        log.warning("article #%s: %s - moved to in_review instead of re-publishing", article["id"], exc)
         return False
     except (SessionExpired, NoChannel):
         db.update_article(article["id"], status="ready", last_error="dzen session expired")

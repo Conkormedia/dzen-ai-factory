@@ -22,6 +22,7 @@ import secrets
 import time
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from .config import Settings
 from .draftjs import markdown_to_html
@@ -33,8 +34,23 @@ EDITOR = f"{BASE}/profile/editor"
 PUBLISHER_RE = re.compile(r"/profile/editor/id/([0-9a-f]{24})")
 
 
+def is_article_url(url: str, publication_id: str = "") -> bool:
+    """A published article page, never the editor: the short https://dzen.ru/a/<id>
+    or, as Dzen started redirecting on 2026-09-30, https://dzen.ru/media/<channel>/<publication id>.
+    Missing the second form marked a real publish as failed and retried it."""
+    path = urlparse(url or "").path
+    if path.startswith("/a/"):
+        return True
+    return path.startswith("/media/") and bool(publication_id) and publication_id in path
+
+
 class DzenError(RuntimeError):
     pass
+
+
+class AlreadyPublished(DzenError):
+    """The draft being published is already live (an earlier attempt went
+    through without being recognized)."""
 
 
 class SessionExpired(DzenError):
@@ -602,6 +618,15 @@ class DzenClient:
         self._page.keyboard.press("Escape")  # dismiss any stray leftover overlay before the publish click
         self._page.get_by_role("button", name="Опубликовать").first.click(force=True, timeout=10000)
         self._pause(2.5, 4.5)
+        # A publication that is already live opens this panel with "Сохранить
+        # изменения" instead of "Опубликовать позже" - never re-submit it.
+        try:
+            already_live = self._page.get_by_role("button", name="Сохранить изменения").first.is_visible(timeout=1500)
+        except Exception:  # noqa: BLE001
+            already_live = False
+        if already_live:
+            self._page.keyboard.press("Escape")
+            raise AlreadyPublished(f"publication {publication_id} is already live on Dzen")
         # First click opens a "Публикация" settings side panel with its OWN
         # "Опубликовать" button paired next to "Опубликовать позже". DOM order
         # doesn't match visual order (portal-rendered panel), so `.last` was
@@ -637,8 +662,8 @@ class DzenClient:
         self._pause(3.0, 5.0)
         # The confirm click can land the published article in a NEW tab
         # rather than navigating the original edit tab - scan every open page.
-        final_url = next((p.url for p in self._ctx.pages if "/a/" in p.url), self._page.url)
-        if "/a/" not in final_url:
+        final_url = next((p.url for p in self._ctx.pages if is_article_url(p.url, publication_id)), self._page.url)
+        if not is_article_url(final_url, publication_id):
             # A disabled confirm button is the reliable signal that a human
             # gate (captcha checkbox, or anything else Dzen decides to block
             # on) is up - clicking a disabled button is a silent no-op, which

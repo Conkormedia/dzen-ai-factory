@@ -22,7 +22,7 @@ from pathlib import Path
 
 from .config import settings
 from .db import Database
-from .dzen_client import DzenClient, publish_full_article
+from .dzen_client import DzenClient, is_article_url, publish_full_article
 
 log = logging.getLogger(__name__)
 
@@ -120,7 +120,7 @@ def run() -> None:
                 except Exception:  # noqa: BLE001
                     print("[manual] page/context gone (window closed?) - stopping")
                     break
-                match = next((u for u in urls if "/a/" in u), "")
+                match = next((u for u in urls if is_article_url(u, result["publication_id"])), "")
                 if match:
                     published_url = match
                     break

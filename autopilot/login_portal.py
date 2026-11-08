@@ -53,11 +53,14 @@ def marker_path(settings: Settings) -> Path:
 def ensure_login(settings: Settings, db, tg: Telegram) -> str:
     """Returns the publisher_id, fast-pathing if a saved session is still valid."""
     publisher_id = db.get_setting("dzen_publisher_id", "")
-    if publisher_id and db.get_setting("dzen_login_complete", "") == "1":
+    # Re-check whenever the channel id is known, even if a previous run cleared
+    # dzen_login_complete: a false "session lost" must not force a human login.
+    if publisher_id:
         try:
             with DzenClient(settings) as client:
                 info = client.check_session(publisher_id)
             if info.get("logged_in") and info.get("publisher_id"):
+                db.set_setting("dzen_login_complete", "1")
                 return info["publisher_id"]
             log.warning("saved Dzen session no longer valid (%s); re-opening login portal", info)
         except Exception:  # noqa: BLE001
@@ -95,7 +98,10 @@ def _run_login_portal(settings: Settings, db, tg: Telegram) -> str:
 
         os.environ["DISPLAY"] = settings.login_display
         with DzenClient(headed_settings) as client:
-            client.goto("https://dzen.ru/profile/editor", wait_ms=2000)  # one-time; nothing else is on the page yet
+            known_pid = db.get_setting("dzen_publisher_id", "")
+            # one-time; nothing else is on the page yet. Bare /profile/editor is a 404 now.
+            client.goto(f"https://dzen.ru/profile/editor/id/{known_pid}" if known_pid else "https://dzen.ru/",
+                        wait_ms=2000)
 
             publisher_id = ""
             last_nudge = time.time()
@@ -117,6 +123,11 @@ def _run_login_portal(settings: Settings, db, tg: Telegram) -> str:
                     continue
                 if info.get("logged_in") and info.get("publisher_id"):
                     publisher_id = info["publisher_id"]
+                    break
+                if (info.get("logged_in") and not info.get("need_channel") and known_pid
+                        and "/profile/editor/" in (info.get("url") or "")):
+                    # Studio under its vanity URL (/profile/editor/<name>) for our known channel.
+                    publisher_id = known_pid
                     break
                 if time.time() - last_nudge > NUDGE_EVERY_SECONDS:
                     last_nudge = time.time()

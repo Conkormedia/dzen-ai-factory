@@ -114,7 +114,8 @@ class DzenClient:
             # in-page fetch() calls need to run FROM dzen.ru or the browser
             # blocks them as cross-origin (TypeError: Failed to fetch) even
             # though the profile's session cookies are already there.
-            self.goto(f"{BASE}/profile/editor", wait_ms=2000)
+            # Bare /profile/editor is a 404 since ~Nov 2026; go to the channel's own editor URL.
+            self.goto(f"{EDITOR}/id/{self.publisher_id}" if self.publisher_id else f"{BASE}/", wait_ms=2000)
         return self
 
     def close(self) -> None:
@@ -183,7 +184,9 @@ class DzenClient:
         relying on the bare /profile/editor page redirecting there itself
         (that redirect can be slow enough to time out our own wait loop,
         which reads as "no channel" even though the session is fine)."""
-        target = f"{EDITOR}/id/{publisher_id}" if publisher_id else EDITOR
+        publisher_id = publisher_id or self.publisher_id
+        # Never the bare EDITOR: Dzen answers it with a 404 page now.
+        target = f"{EDITOR}/id/{publisher_id}" if publisher_id else f"{BASE}/"
         try:
             url = self.goto(target, wait_ms=4000)
             for _ in range(8):  # SPA redirects can take a moment

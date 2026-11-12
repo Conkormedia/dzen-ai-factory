@@ -92,30 +92,38 @@ class DzenClient:
 
         self.settings.profile_dir.mkdir(parents=True, exist_ok=True)
         self._pw = sync_playwright().start()
-        launch_kwargs: dict[str, Any] = dict(
-            user_data_dir=str(self.settings.profile_dir),
-            headless=self.settings.headless,
-            locale="ru-RU",
-            timezone_id=self.settings.timezone,
-            viewport={"width": 1366, "height": 860},
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage",
-                  "--lang=ru-RU", "--disable-session-crashed-bubble", "--disable-infobars",
-                  "--noerrdialogs"],
-            ignore_default_args=["--enable-automation"],
-        )
-        if self.settings.http_proxy:
-            launch_kwargs["proxy"] = {"server": self.settings.http_proxy}
-        self._ctx = self._pw.chromium.launch_persistent_context(**launch_kwargs)
-        self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
-        self._page.set_default_timeout(45000)
-        self._page.on("request", self._capture)
-        if not self._page.url.startswith(BASE):
-            # A fresh persistent-context page starts on about:blank. api()'s
-            # in-page fetch() calls need to run FROM dzen.ru or the browser
-            # blocks them as cross-origin (TypeError: Failed to fetch) even
-            # though the profile's session cookies are already there.
-            # Bare /profile/editor is a 404 since ~Nov 2026; go to the channel's own editor URL.
-            self.goto(f"{EDITOR}/id/{self.publisher_id}" if self.publisher_id else f"{BASE}/", wait_ms=2000)
+        try:
+            launch_kwargs: dict[str, Any] = dict(
+                user_data_dir=str(self.settings.profile_dir),
+                headless=self.settings.headless,
+                locale="ru-RU",
+                timezone_id=self.settings.timezone,
+                viewport={"width": 1366, "height": 860},
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage",
+                      "--lang=ru-RU", "--disable-session-crashed-bubble", "--disable-infobars",
+                      "--noerrdialogs"],
+                ignore_default_args=["--enable-automation"],
+            )
+            if self.settings.http_proxy:
+                launch_kwargs["proxy"] = {"server": self.settings.http_proxy}
+            self._ctx = self._pw.chromium.launch_persistent_context(**launch_kwargs)
+            self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
+            self._page.set_default_timeout(45000)
+            self._page.on("request", self._capture)
+            if not self._page.url.startswith(BASE):
+                # A fresh persistent-context page starts on about:blank. api()'s
+                # in-page fetch() calls need to run FROM dzen.ru or the browser
+                # blocks them as cross-origin (TypeError: Failed to fetch) even
+                # though the profile's session cookies are already there.
+                # Bare /profile/editor is a 404 since ~Nov 2026; go to the channel's own editor URL.
+                self.goto(f"{EDITOR}/id/{self.publisher_id}" if self.publisher_id else f"{BASE}/", wait_ms=2000)
+        except BaseException:
+            # A failed launch/first navigation must still stop Playwright: otherwise its
+            # event loop stays registered on this thread and every later sync_playwright()
+            # dies with "using Playwright Sync API inside the asyncio loop" (crash loop
+            # after the 2026-11-09 OOM kill).
+            self.close()
+            raise
         return self
 
     def close(self) -> None:
